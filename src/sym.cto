@@ -104,12 +104,31 @@ fn symHome(): Text [io] =
         }
     }
 
+// Writes via a same-directory temp file + rename rather than
+// writeFileBytes(path, ...) directly. writeFileBytes truncates and rewrites
+// `path` in place, which is fine for an ordinary file but silently corrupts
+// every other path hardlinked to the same data on disk -- exactly the
+// drift `sym shim add`/`use`/`install` can hit if a package or shim entry
+// ever ends up hardlinked to another path pointing at the same binary.
+// renameFile (MoveFileExA + MOVEFILE_REPLACE_EXISTING on Windows) unlinks
+// `path`'s directory entry and replaces it with the temp file instead of
+// writing through it, so any other hardlink to the old data is left
+// untouched. Any writer of a binary under packages\ or bin\ -- a fresh
+// install, a re-fetch of an already-installed version, a shim stamp --
+// must go through this rather than writeFileBytes directly.
+fn writeBytesAtomic(path: Text, bytes: Bytes): Bool [io] = {
+    let tempPath = path ++ ".tmp"
+    let wrote = writeFileBytes(tempPath, bytes)
+    if !wrote then false
+    else renameFile(tempPath, path)
+}
+
 // Binary-safe copy -- readFile/writeFile (Text) would silently truncate a
 // real executable at its first embedded NUL byte, same class of bug fixed
 // in Stdlib.Http's bodyBytes accessor.
 fn copyBytes(from: Text, to: Text): Bool [io] =
     match readFileBytes(from) {
-        Some(b) => writeFileBytes(to, b)
+        Some(b) => writeBytesAtomic(to, b)
         None => false
     }
 
@@ -307,7 +326,7 @@ fn fetchInstall(home: Text, pv: PkgVer): Unit [io] = {
     match cfg.archive {
         "none" => {
             let dest = Path.join(destDir, Path.basename(binaryPath))
-            let wrote = writeFileBytes(dest, downloaded)
+            let wrote = writeBytesAtomic(dest, downloaded)
             if !wrote then fatal("failed to write " ++ dest) else {}
             println("installed " ++ pv.package ++ "@" ++ pv.version ++ " -> " ++ dest)
         }
