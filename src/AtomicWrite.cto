@@ -1,0 +1,113 @@
+module AtomicWrite
+
+import Stdlib.File
+import Stdlib.Bytes
+import Stdlib.Path
+import Stdlib.Env
+import Stdlib.Process
+import Stdlib.Text
+
+// Writes via a same-directory temp file + rename rather than
+// writeFileBytes(path, ...) directly. writeFileBytes truncates and rewrites
+// `path` in place, which is fine for an ordinary file but silently corrupts
+// every other path hardlinked to the same data on disk -- exactly the
+// drift `sym shim add`/`use`/`install` can hit if a package or shim entry
+// ever ends up hardlinked to another path pointing at the same binary.
+// renameFile (MoveFileExA + MOVEFILE_REPLACE_EXISTING on Windows) unlinks
+// `path`'s directory entry and replaces it with the temp file instead of
+// writing through it, so any other hardlink to the old data is left
+// untouched. Any writer of a binary under packages\ or bin\ -- a fresh
+// install, a re-fetch of an already-installed version, a shim stamp --
+// must go through this rather than writeFileBytes directly.
+//
+// Pulled into its own no-`main` module so it can be exercised by
+// `certo test`: a module with a real `main` currently collides with the
+// test harness's synthesized entry point at link time (undefined symbol
+// CommandLineToArgvW -- a certo-test/WinMain toolchain issue, not
+// something fixable from application code).
+pub fn writeBytesAtomic(path: Text, bytes: Bytes): Bool [io] = {
+    let tempPath = path ++ ".tmp"
+    let wrote = writeFileBytes(tempPath, bytes)
+    if !wrote then false
+    else renameFile(tempPath, path)
+}
+
+// Binary-safe copy -- readFile/writeFile (Text) would silently truncate a
+// real executable at its first embedded NUL byte, same class of bug fixed
+// in Stdlib.Http's bodyBytes accessor.
+pub fn copyBytes(from: Text, to: Text): Bool [io] =
+    match readFileBytes(from) {
+        Some(b) => writeBytesAtomic(to, b)
+        None => false
+    }
+
+// Regression test for the incident that motivated writeBytesAtomic: a real
+// `sym shim add certo certo latest` once hit a bin\certo.exe that had
+// drifted into being an NTFS hardlink to the real packages\certo\latest\
+// certo.exe it was supposed to dispatch to, and the old writeFileBytes(to,
+// ...)-direct copyBytes wrote through that hardlink and destroyed the real
+// compiler binary. This reproduces the drift with a real `mklink /H` (no
+// stdlib primitive creates hardlinks, so this shells out the same way a
+// real drifted install would arise) and asserts the hardlinked sibling
+// survives a write through the other name.
+test "writeBytesAtomic does not corrupt a path hardlinked to its target" {
+    {
+        let dir = Path.join(requireTempDir(), "sym-writeBytesAtomic-test")
+        let _ = removeDir(dir)
+        let made = makeDir(dir)
+        assert(made, "could not create test dir " ++ dir)
+
+        let realPath = Path.join(dir, "real.bin")
+        let linkedPath = Path.join(dir, "linked.bin")
+        let seeded = writeFileBytes(realPath, Bytes.fromText("REAL DATA - DO NOT LOSE"))
+        assert(seeded, "could not seed " ++ realPath)
+
+        // Simulates the drift: linkedPath and realPath become two names
+        // for the same on-disk data, same as bin\certo.exe once was.
+        // mklink (a cmd.exe builtin) rejects Path.join's forward slashes,
+        // so its two arguments need backslashes even though every other
+        // file op here tolerates Path.join's output as-is.
+        // Process.execInherit quotes every args-list element individually,
+        // and cmd.exe's own /C switch detection breaks once /c arrives as
+        // its own pre-quoted token (verified separately) -- /c and the
+        // command it runs must be a single merged argument.
+        let winLinked = Text.replace(linkedPath, "/", "\\")
+        let winReal = Text.replace(realPath, "/", "\\")
+        let linkCode = Process.execInherit("cmd", ["/c mklink /H " ++ winLinked ++ " " ++ winReal])
+        assert(linkCode == 0, "mklink /H failed with exit code " ++ intToText(linkCode))
+
+        let wrote = writeBytesAtomic(linkedPath, Bytes.fromText("SHIM CONTENT"))
+        assert(wrote, "writeBytesAtomic reported failure")
+
+        match readFileBytes(realPath) {
+            Some(b) => assert(
+                Bytes.toText(b) == "REAL DATA - DO NOT LOSE",
+                "real.bin was corrupted by a write through its hardlinked sibling"
+            )
+            None => assert(false, "real.bin unexpectedly missing after test")
+        }
+
+        match readFileBytes(linkedPath) {
+            Some(b) => assert(
+                Bytes.toText(b) == "SHIM CONTENT",
+                "linked.bin does not contain the content written through it"
+            )
+            None => assert(false, "linked.bin unexpectedly missing after test")
+        }
+
+        let _ = deleteFile(realPath)
+        let _ = deleteFile(linkedPath)
+        let _ = removeDir(dir)
+    }
+}
+
+fn requireTempDir(): Text [io] =
+    match getEnv("TEMP") {
+        Some(v) => v
+        None => {
+            eprintln("AtomicWrite: TEMP is not set")
+            flush()
+            Process.quit(127)
+            ""
+        }
+    }
