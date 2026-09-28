@@ -11,6 +11,7 @@ import Stdlib.Process
 import Stdlib.Http
 import Stdlib.Crypto
 import AtomicWrite
+import Junction
 
 fn fatal(msg: Text): Unit [io] = {
     eprintln("sym: " ++ msg)
@@ -32,6 +33,7 @@ fn usageAndExit(): Unit [io] = {
     eprintln("  sym shim list")
     eprintln("  sym use <package> <version>")
     eprintln("  sym pin <tool> <version> [<dir>]")
+    eprintln("  sym alias <package> <alias> <version>")
     flush()
     Process.quit(1)
 }
@@ -449,13 +451,61 @@ fn cmdPin(): Unit [io] = {
 fn cmdUninstall(home: Text): Unit [io] = {
     let pv = requirePkgVer(arg(2), arg(3), "uninstall")
     let dir = Path.join(Path.join(Path.join(home, "packages"), pv.package), pv.version)
-    match listDir(dir) {
-        None => println(pv.package ++ "@" ++ pv.version ++ " is not installed (nothing to remove)")
-        Some(_) => {
-            let removed = removeDir(dir)
-            if removed then println("uninstalled " ++ pv.package ++ "@" ++ pv.version ++ " (removed " ++ dir ++ ")")
-            else fatal("failed to fully remove " ++ dir ++ " (check for files in use)")
+    // removeDir recurses through a directory listing, and Windows makes
+    // that listing transparently follow a junction into its target --
+    // verified directly that removeDir on a junction destroys everything
+    // inside whatever it points at, while leaving the junction's own
+    // entry gone too. "<version>" can be an alias (sym alias, or the
+    // manual junction setup docs/USAGE.md still documents) rather than a
+    // real installed version, so this has to be checked before ever
+    // calling removeDir on it.
+    if isReparsePoint(dir) then
+        fatal(
+            "'" ++ pv.version ++ "' is an alias (a directory junction) for " ++ pv.package ++
+            ", not a real installed version -- uninstalling through it would destroy whatever " ++
+            "real version it currently points at. Uninstall the real version number instead."
+        )
+    else
+        match listDir(dir) {
+            None => println(pv.package ++ "@" ++ pv.version ++ " is not installed (nothing to remove)")
+            Some(_) => {
+                let removed = removeDir(dir)
+                if removed then println("uninstalled " ++ pv.package ++ "@" ++ pv.version ++ " (removed " ++ dir ++ ")")
+                else fatal("failed to fully remove " ++ dir ++ " (check for files in use)")
+            }
         }
+}
+
+// Points packages\<package>\<alias> at packages\<package>\<version> as a
+// directory junction -- the CLI counterpart to the manual `New-Item
+// -ItemType Junction` recipe docs/USAGE.md step 9 has always documented,
+// now going through Junction.setJunction so repointing an existing alias
+// can never write through it or recurse-delete whatever it used to
+// target (see Junction.cto for why that matters). Aliases must point
+// directly at a real installed version rather than another alias --
+// keeps resolution single-hop instead of risking an alias chain/cycle.
+fn cmdAlias(home: Text): Unit [io] = {
+    let package = unwrapOrFatal(arg(2), "alias: missing <package>")
+    let aliasName = unwrapOrFatal(arg(3), "alias: missing <alias>")
+    let version = unwrapOrFatal(arg(4), "alias: missing <version>")
+
+    let packageDir = Path.join(Path.join(home, "packages"), package)
+    let targetPath = Path.join(packageDir, version)
+    if !isDirectory(targetPath) then
+        fatal(package ++ "@" ++ version ++ " is not installed (looked for " ++ targetPath ++ ")")
+    else if isReparsePoint(targetPath) then
+        fatal(
+            "'" ++ version ++ "' is itself an alias -- point '" ++ aliasName ++
+            "' at the real version it resolves to instead, so aliases stay single-hop"
+        )
+    else {
+        let aliasPath = Path.join(packageDir, aliasName)
+        let ok = setJunction(aliasPath, targetPath)
+        if ok then println("aliased " ++ package ++ "@" ++ aliasName ++ " -> " ++ package ++ "@" ++ version)
+        else fatal(
+            "could not set '" ++ aliasName ++ "' for " ++ package ++
+            " -- is " ++ aliasPath ++ " a real directory rather than an alias this command manages?"
+        )
     }
 }
 
@@ -477,6 +527,10 @@ fn main(): Unit [io] = {
             cmdUse(home)
         }
         "pin" => cmdPin()
+        "alias" => {
+            let home = symHome()
+            cmdAlias(home)
+        }
         "shim" => {
             if argCount() < 3 then usageAndExit() else {}
             let home = symHome()

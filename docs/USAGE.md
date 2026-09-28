@@ -156,6 +156,12 @@ the ordinary "is not installed" error the next time that shim runs.
 Running it again for a version that's already gone prints a message
 and exits `0`, not an error.
 
+If `<version>` names an alias (see step 9) rather than a real installed
+version, `sym uninstall` refuses instead of deleting anything: an alias
+is a directory junction, and deleting through it would recurse into and
+destroy whatever real version it currently points at rather than
+removing the alias itself. Uninstall the real version number instead.
+
 ## 6. Shim the tool
 
 ```bash
@@ -254,8 +260,33 @@ you so (see the error reference below).
 
 ## 9. Set up a version alias (`latest`, `lts`, ...)
 
-Create a directory junction (not a symlink — junctions don't need admin
-rights):
+```bash
+sym alias certo latest 1.9.0
+```
+
+This points `packages\certo\latest` at `packages\certo\1.9.0` as a
+directory junction (not a symlink — junctions don't need admin rights).
+`1.9.0` must already be installed and be a real version, not itself an
+alias — aliases only resolve one hop, they don't chain. Now
+`version = "latest"` works in either a descriptor or a `sym.toml` pin,
+exactly like any real version string — the shim doesn't know or care
+that it's a junction.
+
+Run the same command again with a different version to repoint an
+existing alias — `sym alias certo latest 1.10.0` moves `latest` forward.
+This is **not** a plain overwrite: naively deleting the old junction
+with an ordinary recursive delete, or moving a new target onto the
+junction's own path, both corrupt data (verified directly — see
+`src/Junction.cto`), because Windows treats either as an operation on
+whatever the junction currently points at rather than on the junction
+itself. `sym alias` creates the replacement under a temporary name,
+removes only the old junction (never recursing into its target), then
+renames the replacement into place, so repointing never touches the
+old or new target's actual contents. Leave an alias alone to keep it
+frozen instead of repointing it. See the README for the reproducibility
+caveat about using a floating alias in a checked-in project pin.
+
+Equivalent by hand:
 
 ```powershell
 New-Item -ItemType Junction `
@@ -263,12 +294,11 @@ New-Item -ItemType Junction `
   -Target "$env:LOCALAPPDATA\Sym\packages\certo\1.9.0"
 ```
 
-Now `version = "latest"` works in either a descriptor or a `sym.toml`
-pin, exactly like any real version string — the shim doesn't know or
-care that it's a junction. Repoint the junction whenever a newer
-version is installed to make it track forward, or leave it alone to
-keep it frozen. See the README for the reproducibility caveat about
-using a floating alias in a checked-in project pin.
+— but only for the *first* creation. Repointing by hand needs the same
+create-under-temp-name → remove-old-junction-only → rename-into-place
+sequence `sym alias` does; a plain re-run of `New-Item -ItemType
+Junction` over an existing junction, or `Remove-Item -Recurse` on the
+old one first, risks the same corruption described above.
 
 ## 10. Shim a multi-binary release (a "toolchain")
 

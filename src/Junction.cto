@@ -1,0 +1,163 @@
+module Junction
+
+import Stdlib.File
+import Stdlib.Path
+import Stdlib.Text
+import Stdlib.Process
+import Stdlib.Env
+import Stdlib.Bytes
+
+// True if `path` is a reparse point (a directory junction or symlink),
+// as opposed to a real directory/file or nothing at all. Certo has no
+// built-in primitive for this, so it shells out to `fsutil reparsepoint
+// query`: exit code 0 means it's a reparse point, nonzero covers both
+// "exists but isn't one" and "doesn't exist" -- callers here never need
+// to tell those two apart.
+pub fn isReparsePoint(path: Text): Bool [io] = {
+    let result = Process.exec("fsutil", ["reparsepoint", "query", path])
+    ProcessResult.exitCode(result) == 0
+}
+
+// Deletes exactly one reparse point without touching whatever it
+// targets. Returns true if nothing was there to begin with (nothing to
+// remove). Only ever call this on a path already confirmed to be a
+// reparse point -- Certo's ordinary removeDir recurses through a
+// directory listing, and Windows makes that listing transparently
+// follow a junction into its target, so removeDir on a junction
+// destroys everything inside whatever it points at (verified directly;
+// this whole module exists because of that finding).
+fn removeReparsePointOnly(path: Text): Bool [io] =
+    if !isReparsePoint(path) then true
+    else Process.execInherit("cmd", ["/c rmdir " ++ Text.replace(path, "/", "\\")]) == 0
+
+// Creates a directory junction at linkPath -> targetPath, or repoints it
+// if a junction already exists there. Refuses (returns false, touches
+// nothing) if linkPath exists as a real directory rather than a
+// junction -- this only ever deletes a path it has itself confirmed is
+// a link it manages, never anything else.
+//
+// A naive rename/move directly onto an existing junction's own path
+// does NOT repoint it -- verified directly: Windows treats that as
+// "move into the directory the junction points at", silently merging
+// the new target's contents into the OLD target instead of repointing
+// anything, the same write-through-a-link corruption class as the
+// hardlink incident that motivated AtomicWrite.writeBytesAtomic. The
+// safe sequence, also verified directly, is: create the new junction
+// under a temporary name, delete the old junction (link only, never
+// recursing into its target), then rename the temp junction into
+// place. There's a brief window between the delete and the rename
+// where linkPath doesn't exist at all -- a reader hitting that window
+// fails safely (not found) rather than seeing merged or corrupted data.
+pub fn setJunction(linkPath: Text, targetPath: Text): Bool [io] =
+    if isDirectory(linkPath) and !isReparsePoint(linkPath) then false
+    else {
+        let tempPath = linkPath ++ ".new"
+        let _ = removeReparsePointOnly(tempPath)
+        let winTarget = Text.replace(targetPath, "/", "\\")
+        let winTemp = Text.replace(tempPath, "/", "\\")
+        let createCode = Process.execInherit("cmd", ["/c mklink /J " ++ winTemp ++ " " ++ winTarget])
+        if createCode != 0 then false
+        else if !removeReparsePointOnly(linkPath) then false
+        else renameFile(tempPath, linkPath)
+    }
+
+fn junctionTestTempDir(): Text [io] =
+    match getEnv("TEMP") {
+        Some(v) => v
+        None => {
+            eprintln("Junction: TEMP is not set")
+            flush()
+            Process.quit(127)
+            ""
+        }
+    }
+
+test "isReparsePoint tells a junction apart from a real directory and from nothing" {
+    {
+        let dir = Path.join(junctionTestTempDir(), "sym-isReparsePoint-test")
+        let _ = removeReparsePointOnly(Path.join(dir, "link"))
+        let _ = removeDir(dir)
+        let made = makeDir(Path.join(dir, "real"))
+        assert(made, "could not create test dir")
+
+        assert(!isReparsePoint(Path.join(dir, "real")), "a real directory reported as a reparse point")
+        assert(!isReparsePoint(Path.join(dir, "does-not-exist")), "a nonexistent path reported as a reparse point")
+
+        let linked = setJunction(Path.join(dir, "link"), Path.join(dir, "real"))
+        assert(linked, "setJunction failed to create a fresh junction")
+        assert(isReparsePoint(Path.join(dir, "link")), "a freshly created junction not detected as a reparse point")
+
+        let _ = removeReparsePointOnly(Path.join(dir, "link"))
+        let _ = removeDir(dir)
+    }
+}
+
+// Regression test for the finding that motivated this module: repointing
+// an existing junction must never write through it into the old target,
+// and must never recurse-delete the old target's contents either.
+test "setJunction repoints without corrupting the old or new target" {
+    {
+        let dir = Path.join(junctionTestTempDir(), "sym-setJunction-test")
+        let _ = removeReparsePointOnly(Path.join(dir, "active"))
+        let _ = removeDir(dir)
+        let _ = makeDir(dir)
+
+        let v1 = Path.join(dir, "v1")
+        let v2 = Path.join(dir, "v2")
+        let _ = makeDir(v1)
+        let _ = makeDir(v2)
+        let seededV1 = writeFileBytes(Path.join(v1, "marker.txt"), Bytes.fromText("V1 - DO NOT LOSE"))
+        let seededV2 = writeFileBytes(Path.join(v2, "marker.txt"), Bytes.fromText("V2 - DO NOT LOSE"))
+        assert(seededV1 and seededV2, "could not seed v1/v2")
+
+        let active = Path.join(dir, "active")
+        let firstLink = setJunction(active, v1)
+        assert(firstLink, "could not create the initial junction")
+        match readFileBytes(Path.join(active, "marker.txt")) {
+            Some(b) => assert(Bytes.toText(b) == "V1 - DO NOT LOSE", "active didn't resolve to v1 right after creation")
+            None => assert(false, "active\\marker.txt missing right after creation")
+        }
+
+        let repointed = setJunction(active, v2)
+        assert(repointed, "setJunction failed to repoint an existing junction")
+
+        match readFileBytes(Path.join(active, "marker.txt")) {
+            Some(b) => assert(Bytes.toText(b) == "V2 - DO NOT LOSE", "active does not resolve to v2 after repointing")
+            None => assert(false, "active\\marker.txt missing after repointing")
+        }
+        match readFileBytes(Path.join(v1, "marker.txt")) {
+            Some(b) => assert(Bytes.toText(b) == "V1 - DO NOT LOSE", "v1 (the old target) was corrupted by the repoint")
+            None => assert(false, "v1\\marker.txt was deleted by the repoint -- removeDir-through-a-junction bug")
+        }
+        match readFileBytes(Path.join(v2, "marker.txt")) {
+            Some(b) => assert(Bytes.toText(b) == "V2 - DO NOT LOSE", "v2 (the new target) was altered by the repoint")
+            None => assert(false, "v2\\marker.txt is missing -- v2 got consumed instead of linked to")
+        }
+
+        let _ = removeReparsePointOnly(active)
+        let _ = removeDir(dir)
+    }
+}
+
+test "setJunction refuses to replace a real directory" {
+    {
+        let dir = Path.join(junctionTestTempDir(), "sym-setJunction-refuse-test")
+        let _ = removeDir(dir)
+        let realDir = Path.join(dir, "notAJunction")
+        let _ = makeDir(realDir)
+        let seeded = writeFileBytes(Path.join(realDir, "marker.txt"), Bytes.fromText("REAL DIRECTORY - DO NOT TOUCH"))
+        assert(seeded, "could not seed the real directory")
+
+        let otherTarget = Path.join(dir, "someVersion")
+        let _ = makeDir(otherTarget)
+
+        let result = setJunction(realDir, otherTarget)
+        assert(!result, "setJunction should refuse when the link path is a real directory, not a junction")
+        match readFileBytes(Path.join(realDir, "marker.txt")) {
+            Some(b) => assert(Bytes.toText(b) == "REAL DIRECTORY - DO NOT TOUCH", "the real directory was altered despite the refusal")
+            None => assert(false, "the real directory's contents were deleted despite the refusal")
+        }
+
+        let _ = removeDir(dir)
+    }
+}

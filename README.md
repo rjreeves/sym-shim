@@ -149,9 +149,13 @@ is a real directory. Concretely, that means a directory junction:
 ```
 packages\certo\
     1.9.0\certo.exe
-    latest\          ← junction (`New-Item -ItemType Junction`, no admin
-                        rights needed, unlike a symlink) pointing at 1.9.0
+    latest\          ← junction (sym alias, no admin rights needed,
+                        unlike a symlink) pointing at 1.9.0
 ```
+
+`sym alias certo latest 1.9.0` creates or repoints it; `sym uninstall`
+refuses to run on an alias name rather than deleting through it (see
+"Repointing an alias safely" below for why that distinction matters).
 
 Once that junction exists, `version = "latest"` in `shims\certo.toml`
 and `certo = "latest"` in `sym.toml` both resolve correctly — verified
@@ -176,6 +180,42 @@ reproducibility pinning exists for in the first place — two people
 building the same project at different times could silently get
 different versions. Fine for a global default; worth avoiding in a
 project pin meant to be reproducible.
+
+### Repointing an alias safely
+
+Repointing an alias (`sym alias certo latest 1.10.0` when `latest`
+already exists) can't be a plain overwrite. Two naive approaches were
+tried and verified broken before landing on the real implementation
+(`src/Junction.cto`):
+
+- **Moving the new version's directory onto the alias's own path**
+  (`Move-Item v2 -Destination active`, or the equivalent rename) doesn't
+  repoint the junction at all — Windows treats a junction's path as the
+  directory it points *at* for this kind of operation, so it silently
+  merges the new version's files into the *old* target instead. The
+  alias keeps pointing at the old version, which now has a stray
+  subdirectory holding what should've been the new one.
+- **Deleting the old junction with an ordinary recursive delete**
+  (`removeDir`, `Remove-Item -Recurse`, `rm -rf`) doesn't delete the
+  junction — Windows' directory-enumeration APIs follow a junction
+  transparently, so a recursive delete recurses straight through it and
+  destroys every file inside whatever it points at, leaving that
+  version's directory empty. This is the same class of bug that
+  motivated `copyBytes`/`writeBytesAtomic` above, just for directories
+  instead of files, and it's why `sym uninstall` now refuses to run on
+  an alias name (see "Remove an installed version" in USAGE.md).
+
+The safe sequence, verified directly (create a junction, seed both the
+old and new targets with marker files, repoint, confirm both targets'
+files survive untouched and the alias resolves to the new one): create
+the replacement junction under a temporary name, delete *only* the old
+junction — a non-recursive delete of the reparse point itself, which
+touches nothing inside whatever it targets — then rename the
+replacement into place. There's a brief window between the delete and
+the rename where the alias doesn't exist at all; a reader hitting that
+window gets a clean "not found" instead of silently corrupted or merged
+data, which is the same fail-safe-not-silently tradeoff
+`writeBytesAtomic` makes for files.
 
 ## Fetching a package (`sym install <package> <version>`, no local file)
 
