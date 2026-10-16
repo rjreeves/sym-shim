@@ -1,0 +1,7 @@
+module argzero
+
+// Prints argv[0] -- the path the shim actually launched. tests/commands
+// compares it with what `sym which` says the shim will run.
+fn main(): Unit [io] = {
+    println(arg(0) ?? "")
+}

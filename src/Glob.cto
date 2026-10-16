@@ -1,0 +1,69 @@
+module Glob
+
+import Stdlib.Core
+import Stdlib.Text
+
+// Case-insensitive wildcard match used to pick which executables in a
+// version folder `sym shim add-all` should shim: `*` matches any run of
+// characters (including none), `?` matches exactly one, everything else
+// matches itself. Windows file names are case-insensitive, so "CERTO*"
+// and "certo*" are the same pattern.
+pub fn globMatch(pattern: Text, text: Text): Bool =
+    globAt(Text.toLower(pattern), 0, Text.toLower(text), 0)
+
+fn globAt(p: Text, pi: Int, t: Text, ti: Int): Bool =
+    if pi >= Text.len(p) then ti >= Text.len(t)
+    else if Text.slice(p, pi, pi + 1) == "*" then globStarFrom(p, pi + 1, t, ti)
+    else if ti >= Text.len(t) then false
+    else if Text.slice(p, pi, pi + 1) == "?" or Text.slice(p, pi, pi + 1) == Text.slice(t, ti, ti + 1)
+    then globAt(p, pi + 1, t, ti + 1)
+    else false
+
+// The `*` just before p[pi] may swallow zero or more characters of t:
+// succeed if the rest of the pattern matches from any position onward.
+fn globStarFrom(p: Text, pi: Int, t: Text, ti: Int): Bool =
+    if globAt(p, pi, t, ti) then true
+    else if ti >= Text.len(t) then false
+    else globStarFrom(p, pi, t, ti + 1)
+
+test "globMatch: literals and case" {
+    {
+        assert(globMatch("certo.exe", "certo.exe"), "identical")
+        assert(globMatch("CERTO.EXE", "certo.exe"), "pattern upper, text lower")
+        assert(globMatch("certo.exe", "Certo.Exe"), "pattern lower, text mixed")
+        assert(!globMatch("certo.exe", "certo-fmt.exe"), "different name")
+        assert(!globMatch("certo", "certo.exe"), "no implicit trailing match")
+        assert(globMatch("", ""), "empty matches empty")
+        assert(!globMatch("", "x"), "empty pattern does not match text")
+    }
+}
+
+test "globMatch: star" {
+    {
+        assert(globMatch("*", "anything.exe"), "lone star matches everything")
+        assert(globMatch("*", ""), "star matches empty")
+        assert(globMatch("certo*", "certo.exe"), "prefix star, nothing extra")
+        assert(globMatch("certo*", "certo-fmt.exe"), "prefix star, with extra")
+        assert(!globMatch("certo*", "db_users.exe"), "prefix star rejects other names")
+        assert(!globMatch("certo*", "xcerto.exe"), "prefix star is anchored at the start")
+        assert(globMatch("*.exe", "certo.exe"), "suffix star")
+        assert(!globMatch("*.exe", "certo.lib"), "suffix star rejects other extensions")
+        assert(globMatch("*-fmt*", "certo-fmt.exe"), "star in the middle of a name")
+        assert(globMatch("a*b*c", "aXXbYYc"), "two stars")
+        assert(globMatch("a*b*c", "abc"), "stars matching nothing")
+        assert(!globMatch("a*b*c", "aXXbYY"), "must still end in c")
+        assert(globMatch("**", "x"), "adjacent stars")
+        assert(globMatch("certo*", "certo"), "trailing star may match nothing")
+    }
+}
+
+test "globMatch: question mark" {
+    {
+        assert(globMatch("?", "a"), "one char")
+        assert(!globMatch("?", ""), "needs a char")
+        assert(!globMatch("?", "ab"), "exactly one")
+        assert(globMatch("cert?.exe", "certo.exe"), "single wildcard inside")
+        assert(!globMatch("cert?.exe", "cert.exe"), "does not match zero")
+        assert(globMatch("?*", "abc"), "question then star")
+    }
+}

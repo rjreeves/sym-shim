@@ -12,6 +12,8 @@ import Stdlib.Http
 import Stdlib.Crypto
 import AtomicWrite
 import Junction
+import ShimConfig
+import Glob
 
 fn fatal(msg: Text): Unit [io] = {
     eprintln("sym: " ++ msg)
@@ -29,11 +31,15 @@ fn usageAndExit(): Unit [io] = {
     eprintln("  sym install <package> <version> <source-file> [<command-filename>]")
     eprintln("  sym uninstall <package> <version>")
     eprintln("  sym shim add <name> <package> <version> [<command-filename>]")
+    eprintln("  sym shim add-all <package> <version> [<pattern>] [--dry-run]")
     eprintln("  sym shim remove <name>")
     eprintln("  sym shim list")
     eprintln("  sym use <package> <version>")
     eprintln("  sym pin <tool> <version> [<dir>]")
     eprintln("  sym alias <package> <alias> <version>")
+    eprintln("  sym list [<package>]")
+    eprintln("  sym which <name>")
+    eprintln("  sym doctor")
     flush()
     Process.quit(1)
 }
@@ -48,38 +54,6 @@ fn unwrapOrFatal(opt: Text?, msg: Text): Text [io] =
             ""
         }
     }
-
-fn stripQuotes(s: Text): Text =
-    if Text.startsWith(s, "\"") and Text.endsWith(s, "\"") and Text.len(s) >= 2
-    then Text.slice(s, 1, Text.len(s) - 1)
-    else s
-
-type KeyValue = { key: Text, value: Text }
-
-fn parseKVLine(line: Text): KeyValue? = {
-    let trimmed = Text.trim(line)
-    if Text.len(trimmed) == 0 or Text.startsWith(trimmed, "#") then None
-    else match Text.indexOf(trimmed, "=") {
-        Some(eq) => Some(KeyValue {
-            key: Text.trim(Text.slice(trimmed, 0, eq)),
-            value: stripQuotes(Text.trim(Text.slice(trimmed, eq + 1, Text.len(trimmed))))
-        })
-        None => None
-    }
-}
-
-fn findKeyIn(content: Text, wantedKey: Text): Text? = {
-    var result: Text? = None
-    for line in Text.split(content, "\n") {
-        match parseKVLine(line) {
-            Some(kv) => {
-                if kv.key == wantedKey then { result = Some(kv.value) } else {}
-            }
-            None => {}
-        }
-    }
-    result
-}
 
 type PkgVer = { package: Text, version: Text }
 
@@ -124,68 +98,6 @@ fn writeDescriptor(path: Text, package: Text, command: Text, version: Text): Boo
         "command = \"" ++ command ++ "\"\n" ++
         "version = \"" ++ version ++ "\"\n"
     )
-
-type Descriptor = { package: Text, command: Text, version: Text }
-
-fn parseDescriptor(content: Text): Descriptor = {
-    var package = ""
-    var command = ""
-    var version = ""
-    for line in Text.split(content, "\n") {
-        match parseKVLine(line) {
-            Some(kv) => {
-                match kv.key {
-                    "package" => { package = kv.value }
-                    "command" => { command = kv.value }
-                    "version" => { version = kv.value }
-                    _ => {}
-                }
-            }
-            None => {}
-        }
-    }
-    Descriptor { package: package, command: command, version: version }
-}
-
-// Rewrites `key`'s value if present (preserving every other line, including
-// comments), or appends a new "key = value" line if absent.
-fn upsertLine(content: Text, key: Text, value: Text): Text = {
-    if Text.len(Text.trim(content)) == 0 then key ++ " = \"" ++ value ++ "\"\n"
-    else {
-        var found = false
-        var result = ""
-        for line in Text.split(content, "\n") {
-            match parseKVLine(line) {
-                Some(kv) => {
-                    if kv.key == key then {
-                        result = result ++ key ++ " = \"" ++ value ++ "\"\n"
-                        found = true
-                    } else {
-                        result = result ++ line ++ "\n"
-                    }
-                }
-                None => {
-                    if Text.len(Text.trim(line)) == 0 then {}
-                    else { result = result ++ line ++ "\n" }
-                }
-            }
-        }
-        if found then result else result ++ key ++ " = \"" ++ value ++ "\"\n"
-    }
-}
-
-fn listTomlFiles(dir: Text): List<Text> = {
-    var result: List<Text> = List.empty()
-    match listDir(dir) {
-        Some(entries) => {
-            for e in entries {
-                if Text.endsWith(e, ".toml") then { result = List.push(result, e) } else {}
-            }
-        }
-        None => {}
-    }
-    result
-}
 
 // Reads sources\<package>.toml -- the per-package "how to fetch" config.
 // `repo`/`tag`/`asset` are only used by the "github-release" provider;
@@ -381,29 +293,115 @@ fn cmdInstall(home: Text): Unit [io] = {
     }
 }
 
+// Stamps bin\<name>.exe from the master shim and writes shims\<name>.toml.
+// Returns "" on success, or a message saying what failed -- so `shim add`
+// can stop on it and `shim add-all` can report it and carry on.
+fn stampShim(home: Text, name: Text, package: Text, version: Text, commandName: Text): Text [io] = {
+    let binDir = Path.join(home, "bin")
+    let masterShim = Path.join(Path.join(home, "shim"), "sym_shim.exe")
+    let binPath = Path.join(binDir, name ++ ".exe")
+    let shimsDir = Path.join(home, "shims")
+    let descPath = Path.join(shimsDir, name ++ ".toml")
+
+    if !makeDir(binDir) then "could not create " ++ binDir
+    else if !copyBytes(masterShim, binPath) then "could not copy shim from '" ++ masterShim ++ "' -- is it built and in place?"
+    else if !makeDir(shimsDir) then "could not create " ++ shimsDir
+    else if !writeDescriptor(descPath, package, commandName, version) then "failed to write " ++ descPath
+    else ""
+}
+
 fn cmdShimAdd(home: Text): Unit [io] = {
     let name = unwrapOrFatal(arg(3), "shim add: missing <name>")
     let pv = requirePkgVer(arg(4), arg(5), "shim add")
     let commandName = arg(6) ?? (name ++ ".exe")
 
-    let binDir = Path.join(home, "bin")
-    let madeBin = makeDir(binDir)
-    if !madeBin then fatal("could not create " ++ binDir) else {}
-
-    let masterShim = Path.join(Path.join(home, "shim"), "sym_shim.exe")
-    let binPath = Path.join(binDir, name ++ ".exe")
-    let copied = copyBytes(masterShim, binPath)
-    if !copied then fatal("could not copy shim from '" ++ masterShim ++ "' -- is it built and in place?") else {}
-
-    let shimsDir = Path.join(home, "shims")
-    let madeShims = makeDir(shimsDir)
-    if !madeShims then fatal("could not create " ++ shimsDir) else {}
-
-    let descPath = Path.join(shimsDir, name ++ ".toml")
-    let wrote = writeDescriptor(descPath, pv.package, commandName, pv.version)
-    if !wrote then fatal("failed to write " ++ descPath) else {}
+    let problem = stampShim(home, name, pv.package, pv.version, commandName)
+    if Text.len(problem) > 0 then fatal(problem) else {}
 
     println("shimmed '" ++ name ++ "' -> " ++ pv.package ++ "@" ++ pv.version ++ " (" ++ commandName ++ ")")
+}
+
+fn stripExe(name: Text): Text =
+    if Text.endsWith(Text.toLower(name), ".exe") then Text.slice(name, 0, Text.len(name) - 4) else name
+
+// Shims every executable in packages\<package>\<version>\ that matches
+// <pattern> (default: all of them) -- for a release that ships several
+// binaries (Certo's ships certo, certo-fmt, certo-lsp, ...). Each becomes a
+// shim named after its file, e.g. certo-fmt.exe -> `certo-fmt`.
+//
+//   sym shim add-all <package> <version> [<pattern>] [--dry-run]
+//
+// <pattern> uses * and ? and matches the file name with or without ".exe"
+// ("certo*" and "certo*.exe" are the same). A name that is already shimmed
+// to a DIFFERENT package is skipped, not overwritten -- re-running for the
+// same package just re-stamps, so it is safe to repeat.
+fn cmdShimAddAll(home: Text): Unit [io] = {
+    let package = unwrapOrFatal(arg(3), "shim add-all: missing <package>")
+    let version = unwrapOrFatal(arg(4), "shim add-all: missing <version>")
+    var pattern = "*"
+    var dryRun = false
+    for i in range(5, argCount()) {
+        match arg(i) {
+            Some(a) => {
+                if a == "--dry-run" then { dryRun = true } else { pattern = a }
+            }
+            None => {}
+        }
+    }
+
+    let versionDir = Path.join(Path.join(Path.join(home, "packages"), package), version)
+    if !isDirectory(versionDir) then
+        fatal(package ++ "@" ++ version ++ " is not installed (looked for " ++ versionDir ++ ")")
+    else {}
+
+    var matched: List<Text> = List.empty()
+    match listDir(versionDir) {
+        Some(entries) => {
+            for e in entries {
+                if Text.endsWith(Text.toLower(e), ".exe") and !isDirectory(Path.join(versionDir, e))
+                    and (globMatch(pattern, e) or globMatch(pattern, stripExe(e))) then {
+                    matched = List.push(matched, e)
+                } else {}
+            }
+        }
+        None => {}
+    }
+    if List.len(matched) == 0 then
+        fatal("no executables in " ++ versionDir ++ " match '" ++ pattern ++ "'")
+    else {}
+
+    var shimmed = 0
+    var skipped = 0
+    var failed = 0
+    for e in matched {
+        let name = stripExe(e)
+        let descPath = Path.join(Path.join(home, "shims"), name ++ ".toml")
+        let existingPackage = match readFile(descPath) {
+            Some(c) => findKeyIn(c, "package") ?? ""
+            None => ""
+        }
+        if Text.len(existingPackage) > 0 and existingPackage != package then {
+            println("skipped '" ++ name ++ "': already shimmed to package '" ++ existingPackage ++
+                "' (sym shim remove " ++ name ++ " first if you want to replace it)")
+            skipped = skipped + 1
+        } else if dryRun then {
+            println("would shim '" ++ name ++ "' -> " ++ package ++ "@" ++ version ++ " (" ++ e ++ ")")
+            shimmed = shimmed + 1
+        } else {
+            let problem = stampShim(home, name, package, version, e)
+            if Text.len(problem) > 0 then {
+                eprintln("sym: " ++ name ++ ": " ++ problem)
+                failed = failed + 1
+            } else {
+                println("shimmed '" ++ name ++ "' -> " ++ package ++ "@" ++ version ++ " (" ++ e ++ ")")
+                shimmed = shimmed + 1
+            }
+        }
+    }
+
+    let verb = if dryRun then "would shim " else "shimmed "
+    println(verb ++ intToText(shimmed) ++ ", skipped " ++ intToText(skipped) ++ ", failed " ++ intToText(failed))
+    if failed > 0 then Process.quit(1) else {}
 }
 
 fn cmdShimRemove(home: Text): Unit [io] = {
@@ -529,6 +527,450 @@ fn cmdAlias(home: Text): Unit [io] = {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Inspection: list, which, doctor. All read-only.
+// ---------------------------------------------------------------------------
+
+// Path.join builds paths with "/"; show them the way Windows does.
+fn winPath(p: Text): Text = Text.replace(p, "/", "\\")
+
+// Lower-cased, backslashed, no trailing slash: for comparing paths.
+fn normPath(p: Text): Text = {
+    let w = Text.toLower(winPath(p))
+    if Text.endsWith(w, "\\") and Text.len(w) > 3 then Text.slice(w, 0, Text.len(w) - 1) else w
+}
+
+fn lastSegment(p: Text): Text = Path.basename(Text.replace(p, "\\", "/"))
+
+// "package|version|shim-name" for every descriptor, so a version can be
+// annotated with the shims that currently run it.
+fn collectUses(home: Text): List<Text> [io] = {
+    var uses: List<Text> = List.empty()
+    let shimsDir = Path.join(home, "shims")
+    for f in listTomlFiles(shimsDir) {
+        match readFile(Path.join(shimsDir, f)) {
+            Some(c) => {
+                let pkg = findKeyIn(c, "package") ?? ""
+                let ver = findKeyIn(c, "version") ?? ""
+                uses = List.push(uses, pkg ++ "|" ++ ver ++ "|" ++ Path.stem(f))
+            }
+            None => {}
+        }
+    }
+    uses
+}
+
+fn usersOf(uses: List<Text>, pkg: Text, ver: Text): List<Text> = {
+    var names: List<Text> = List.empty()
+    for u in uses {
+        let parts = Text.split(u, "|")
+        if (List.get(parts, 0) ?? "") == pkg and (List.get(parts, 1) ?? "") == ver then {
+            names = List.push(names, List.get(parts, 2) ?? "")
+        } else {}
+    }
+    names
+}
+
+// "  -> 1.0.71   (alias)" for an alias folder, flagging one whose target is gone.
+fn aliasText(vdir: Text): Text [io] =
+    match junctionTarget(vdir) {
+        Some(t) => {
+            if isDirectory(t) then "  -> " ++ lastSegment(t) ++ "   (alias)"
+            else "  -> " ++ lastSegment(t) ++ "   (alias, TARGET MISSING)"
+        }
+        None => "   (alias, target unreadable)"
+    }
+
+fn listPackage(pdir: Text, pkg: Text, uses: List<Text>): Unit [io] =
+    match listDir(pdir) {
+        Some(entries) => {
+            for v in entries {
+                let vdir = Path.join(pdir, v)
+                let users = usersOf(uses, pkg, v)
+                let usedText = if List.len(users) == 0 then "" else "   used by: " ++ Text.join(users, ", ")
+                if isReparsePoint(vdir) then println("  " ++ v ++ aliasText(vdir) ++ usedText)
+                else if isDirectory(vdir) then println("  " ++ v ++ usedText)
+                else {}
+            }
+        }
+        None => {}
+    }
+
+// sym list [<package>] -- what is installed, with aliases shown pointing at
+// their versions and each version marked with the shims that run it.
+fn cmdList(home: Text): Unit [io] = {
+    let wanted = match arg(2) {
+        Some(a) => a
+        None => ""
+    }
+    let packagesDir = Path.join(home, "packages")
+    let uses = collectUses(home)
+    var shown = 0
+    match listDir(packagesDir) {
+        Some(pkgs) => {
+            for p in pkgs {
+                let pdir = Path.join(packagesDir, p)
+                if isDirectory(pdir) and (wanted == "" or wanted == p) then {
+                    println(p)
+                    listPackage(pdir, p, uses)
+                    shown = shown + 1
+                } else {}
+            }
+        }
+        None => {}
+    }
+    if shown == 0 then {
+        if wanted == "" then println("(nothing installed)")
+        else println("(no package named '" ++ wanted ++ "' is installed)")
+    } else {}
+}
+
+fn describePin(pin: PinLookup, name: Text, cwd: Text): Text =
+    if Text.len(pin.file) == 0 then "none (no sym.toml in " ++ winPath(cwd) ++ " or above)"
+    else if pin.hasPin then pin.version ++ "  from " ++ winPath(pin.file)
+    else "none -- " ++ winPath(pin.file) ++ " exists but doesn't pin " ++ name ++ " (the nearest sym.toml wins; parents aren't consulted)"
+
+// sym which <name> -- exactly what running <name> from here would do, worked
+// out the way the shim itself does it. Exit code 1 if it wouldn't work.
+fn cmdWhich(home: Text): Unit [io] = {
+    let name = stripExe(unwrapOrFatal(arg(2), "which: missing <name>"))
+    let cwd = getCurrentDir()
+    let r = resolveShim(home, name, cwd)
+    var problem = false
+    println(name)
+
+    let shimExe = Path.join(Path.join(home, "bin"), name ++ ".exe")
+    if fileExists(shimExe) then println("  shim        " ++ winPath(shimExe))
+    else {
+        println("  shim        MISSING " ++ winPath(shimExe) ++ " -- '" ++ name ++ "' can't be run by name")
+        problem = true
+    }
+
+    if !r.hasDescriptor then {
+        println("  descriptor  none -- " ++ winPath(r.descriptorPath) ++ " doesn't exist")
+        println("  pin         " ++ describePin(r.pin, name, cwd))
+        if r.pin.hasPin then
+            println("  hint        pinned to " ++ r.pin.version ++ " but never shimmed: sym shim add " ++ name ++ " <package> " ++ r.pin.version)
+        else
+            println("  hint        '" ++ name ++ "' isn't a shimmed name -- see: sym shim list")
+        problem = true
+    } else {
+        println("  descriptor  " ++ winPath(r.descriptorPath) ++ "  (package=" ++ r.package ++ ", command=" ++ r.command ++ ", version=" ++ r.descriptorVersion ++ ")")
+        println("  pin         " ++ describePin(r.pin, name, cwd))
+        if Text.len(r.package) == 0 or Text.len(r.command) == 0 or Text.len(r.descriptorVersion) == 0 then {
+            println("  status      MALFORMED descriptor -- needs package, command and version")
+            problem = true
+        } else {
+            println("  version     " ++ r.version ++ (if r.pin.hasPin then "  (project pin)" else "  (global)"))
+            if isReparsePoint(r.versionDir) then println("  alias       " ++ r.version ++ aliasText(r.versionDir)) else {}
+            println("  runs        " ++ winPath(r.target))
+            if fileExists(r.target) then println("  status      ok")
+            else if isReparsePoint(r.versionDir) and !isDirectory(r.versionDir) then {
+                println("  status      ALIAS TARGET MISSING -- " ++ r.version ++ " points at a folder that no longer exists")
+                problem = true
+            } else if !isDirectory(r.versionDir) then {
+                println("  status      NOT INSTALLED -- no folder " ++ winPath(r.versionDir))
+                problem = true
+            } else {
+                println("  status      MISSING -- " ++ r.command ++ " is not in " ++ winPath(r.versionDir))
+                problem = true
+            }
+        }
+    }
+    if problem then Process.quit(1) else {}
+}
+
+// ---- doctor -----------------------------------------------------------------
+
+fn findOk(msg: Text): Text = "ok|" ++ msg
+fn findWarn(msg: Text): Text = "warn|" ++ msg
+fn findFail(msg: Text): Text = "FAIL|" ++ msg
+
+fn countLevel(findings: List<Text>, level: Text): Int = {
+    var n = 0
+    for e in findings {
+        if Text.startsWith(e, level ++ "|") then { n = n + 1 } else {}
+    }
+    n
+}
+
+fn printFindings(title: Text, findings: List<Text>): Unit [io] = {
+    println("")
+    println(title)
+    for e in findings {
+        match Text.indexOf(e, "|") {
+            Some(i) => {
+                let level = Text.slice(e, 0, i)
+                let msg = Text.slice(e, i + 1, Text.len(e))
+                let label = if level == "ok" then "ok    " else if level == "warn" then "warn  " else "FAIL  "
+                println("  " ++ label ++ msg)
+            }
+            None => println("  " ++ e)
+        }
+    }
+}
+
+fn fileSha256(path: Text): Text =
+    match readFileBytes(path) {
+        Some(b) => Bytes.toHex(Crypto.sha256Bytes(b))
+        None => ""
+    }
+
+// Other paths that share their data with `path` (NTFS hardlinks) -- the
+// drift that once let a write through bin\certo.exe destroy the real
+// compiler. `fsutil hardlink list` prints volume-relative paths, one per
+// line, including the file's own.
+fn hardlinkPeers(path: Text): List<Text> [io] = {
+    var peers: List<Text> = List.empty()
+    let r = Process.exec("fsutil", ["hardlink", "list", path])
+    if ProcessResult.exitCode(r) == 0 then {
+        let self = normPath(path)
+        for line in Text.split(ProcessResult.stdout(r), "\n") {
+            let t = Text.trim(line)
+            if Text.len(t) > 0 and !Text.endsWith(self, normPath(t)) then { peers = List.push(peers, t) } else {}
+        }
+    } else {}
+    peers
+}
+
+fn onPath(dir: Text): Bool =
+    match getEnv("PATH") {
+        Some(p) => {
+            var found = false
+            for e in Text.split(p, ";") {
+                if Text.len(e) > 0 and normPath(e) == normPath(dir) then { found = true } else {}
+            }
+            found
+        }
+        None => false
+    }
+
+fn checkLayout(home: Text): List<Text> [io] = {
+    var f: List<Text> = List.empty()
+    if !isDirectory(home) then {
+        f = List.push(f, findFail("Sym home not found: " ++ winPath(home)))
+    } else {
+        for d in ["shim", "bin", "shims", "packages"] {
+            if isDirectory(Path.join(home, d)) then { f = List.push(f, findOk(d ++ "\\ present")) }
+            else { f = List.push(f, findFail(d ++ "\\ is missing -- run the installer (scripts\\install.cmd)")) }
+        }
+        let master = Path.join(Path.join(home, "shim"), "sym_shim.exe")
+        if fileExists(master) then { f = List.push(f, findOk("shim\\sym_shim.exe present")) }
+        else { f = List.push(f, findFail("shim\\sym_shim.exe is missing, so `sym shim add` can't stamp new shims")) }
+        let binDir = Path.join(home, "bin")
+        if onPath(binDir) then { f = List.push(f, findOk(winPath(binDir) ++ " is on PATH")) }
+        else { f = List.push(f, findWarn(winPath(binDir) ++ " is not on PATH in this session: shimmed tools won't resolve by name (a terminal opened since the installer ran may differ)")) }
+        if onPath(home) then { f = List.push(f, findOk(winPath(home) ++ " is on PATH")) }
+        else { f = List.push(f, findWarn(winPath(home) ++ " is not on PATH in this session: the `sym` command won't resolve by name")) }
+    }
+    f
+}
+
+fn checkOneShim(home: Text, descFile: Text, masterHash: Text): List<Text> [io] = {
+    var f: List<Text> = List.empty()
+    let name = Path.stem(descFile)
+    let descPath = Path.join(Path.join(home, "shims"), descFile)
+    let content = match readFile(descPath) {
+        Some(c) => c
+        None => ""
+    }
+    let pkg = findKeyIn(content, "package") ?? ""
+    let cmd = findKeyIn(content, "command") ?? ""
+    let ver = findKeyIn(content, "version") ?? ""
+    let stampHint = "sym shim add " ++ name ++ " " ++ pkg ++ " " ++ ver ++ (if cmd == name ++ ".exe" then "" else " " ++ cmd)
+
+    if Text.len(pkg) == 0 or Text.len(cmd) == 0 or Text.len(ver) == 0 then {
+        f = List.push(f, findFail(name ++ ": " ++ winPath(descPath) ++ " is missing package, command or version"))
+    } else {
+        let binExe = Path.join(Path.join(home, "bin"), name ++ ".exe")
+        if !fileExists(binExe) then {
+            f = List.push(f, findFail(name ++ ": bin\\" ++ name ++ ".exe is missing, so '" ++ name ++ "' can't be run by name -- fix: " ++ stampHint))
+        } else {
+            if Text.len(masterHash) > 0 and fileSha256(binExe) != masterHash then {
+                f = List.push(f, findWarn(name ++ ": bin\\" ++ name ++ ".exe differs from shim\\sym_shim.exe (stamped by a different build) -- refresh: " ++ stampHint))
+            } else {}
+            let peers = hardlinkPeers(binExe)
+            if List.len(peers) > 0 then {
+                f = List.push(f, findFail(name ++ ": bin\\" ++ name ++ ".exe shares its data with " ++ Text.join(peers, ", ") ++ " -- writing to one changes the other; fix: delete it and re-run " ++ stampHint))
+            } else {}
+        }
+        // the descriptor's own version, not a project pin: pins get their own section
+        let target =Path.join(Path.join(Path.join(Path.join(home, "packages"), pkg), ver), cmd)
+        if !fileExists(target) then {
+            f = List.push(f, findFail(name ++ ": " ++ pkg ++ "@" ++ ver ++ " isn't runnable -- " ++ winPath(target) ++ " doesn't exist"))
+        } else {}
+    }
+    if List.len(f) == 0 then { f = List.push(f, findOk(name ++ " -> " ++ pkg ++ "@" ++ ver ++ " (" ++ cmd ++ ")")) } else {}
+    f
+}
+
+fn checkShims(home: Text): List<Text> [io] = {
+    var f: List<Text> = List.empty()
+    let master = Path.join(Path.join(home, "shim"), "sym_shim.exe")
+    let masterHash = if fileExists(master) then fileSha256(master) else ""
+    let files = listTomlFiles(Path.join(home, "shims"))
+    if List.len(files) == 0 then { f = List.push(f, findOk("no shims defined")) } else {}
+    for d in files {
+        f = List.concat(f, checkOneShim(home, d, masterHash))
+    }
+    f
+}
+
+fn checkAliases(home: Text): List<Text> [io] = {
+    var f: List<Text> = List.empty()
+    var checked = 0
+    var bad = 0
+    let packagesDir = Path.join(home, "packages")
+    match listDir(packagesDir) {
+        Some(pkgs) => {
+            for p in pkgs {
+                let pdir = Path.join(packagesDir, p)
+                match listDir(pdir) {
+                    Some(entries) => {
+                        for v in entries {
+                            let vdir = Path.join(pdir, v)
+                            if isReparsePoint(vdir) then {
+                                checked = checked + 1
+                                match junctionTarget(vdir) {
+                                    Some(t) => {
+                                        if !isDirectory(t) then {
+                                            f = List.push(f, findFail(p ++ "\\" ++ v ++ " points at " ++ t ++ ", which no longer exists"))
+                                            bad = bad + 1
+                                        } else if isReparsePoint(t) then {
+                                            f = List.push(f, findWarn(p ++ "\\" ++ v ++ " points at another alias (" ++ t ++ "); aliases should point at a real version"))
+                                            bad = bad + 1
+                                        } else {}
+                                    }
+                                    None => {
+                                        f = List.push(f, findWarn(p ++ "\\" ++ v ++ " is an alias but its target couldn't be read"))
+                                        bad = bad + 1
+                                    }
+                                }
+                            } else {}
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    if bad == 0 then {
+        if checked == 0 then { f = List.push(f, findOk("no aliases")) }
+        else { f = List.push(f, findOk(intToText(checked) ++ " alias(es), all pointing at a real folder")) }
+    } else {}
+    f
+}
+
+fn isStrayTemp(e: Text): Bool = {
+    let l = Text.toLower(e)
+    Text.endsWith(l, ".tmp") or Text.endsWith(l, ".new")
+}
+
+fn checkStrays(home: Text): List<Text> [io] = {
+    var f: List<Text> = List.empty()
+    var bad = 0
+    // anything in bin\ that isn't a shim stamped for a descriptor
+    let binDir = Path.join(home, "bin")
+    match listDir(binDir) {
+        Some(entries) => {
+            for e in entries {
+                if isStrayTemp(e) then {
+                    f = List.push(f, findWarn("leftover temp file bin\\" ++ e ++ " (an interrupted write) -- safe to delete"))
+                    bad = bad + 1
+                } else if Text.endsWith(Text.toLower(e), ".exe") and !fileExists(Path.join(Path.join(home, "shims"), stripExe(e) ++ ".toml")) then {
+                    f = List.push(f, findWarn("bin\\" ++ e ++ " has no descriptor in shims\\ -- it isn't a working shim; remove it or: sym shim add " ++ stripExe(e) ++ " <package> <version>"))
+                    bad = bad + 1
+                } else {}
+            }
+        }
+        None => {}
+    }
+    for d in ["shim", "shims"] {
+        match listDir(Path.join(home, d)) {
+            Some(entries) => {
+                for e in entries {
+                    if isStrayTemp(e) then {
+                        f = List.push(f, findWarn("leftover temp file " ++ d ++ "\\" ++ e ++ " (an interrupted write) -- safe to delete"))
+                        bad = bad + 1
+                    } else {}
+                }
+            }
+            None => {}
+        }
+    }
+    if bad == 0 then { f = List.push(f, findOk("no orphaned shims or leftover temp files")) } else {}
+    f
+}
+
+// The nearest sym.toml from the current directory: every tool it pins must
+// be a shimmed name whose pinned version is actually installed.
+fn checkPins(home: Text): List<Text> [io] = {
+    var f: List<Text> = List.empty()
+    let cwd = getCurrentDir()
+    let found = findPin(cwd, "")
+    if Text.len(found.file) == 0 then {
+        f = List.push(f, findOk("no sym.toml in " ++ winPath(cwd) ++ " or above"))
+    } else {
+        let content = match readFile(found.file) {
+            Some(c) => c
+            None => ""
+        }
+        f = List.push(f, findOk("checking " ++ winPath(found.file)))
+        var n = 0
+        for line in Text.split(content, "\n") {
+            match parseKVLine(line) {
+                Some(kv) => {
+                    n = n + 1
+                    let descPath = Path.join(Path.join(home, "shims"), kv.key ++ ".toml")
+                    match readFile(descPath) {
+                        Some(dc) => {
+                            let pkg = findKeyIn(dc, "package") ?? ""
+                            let cmd = findKeyIn(dc, "command") ?? ""
+                            let target = Path.join(Path.join(Path.join(Path.join(home, "packages"), pkg), kv.value), cmd)
+                            if fileExists(target) then { f = List.push(f, findOk(kv.key ++ " = " ++ kv.value ++ " is installed")) }
+                            else { f = List.push(f, findFail(kv.key ++ " is pinned to " ++ kv.value ++ " but " ++ winPath(target) ++ " doesn't exist -- install it, or fix the pin")) }
+                        }
+                        None => {
+                            f = List.push(f, findWarn(kv.key ++ " is pinned to " ++ kv.value ++ " but was never shimmed -- sym shim add " ++ kv.key ++ " <package> " ++ kv.value))
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        if n == 0 then { f = List.push(f, findOk("it pins nothing")) } else {}
+    }
+    f
+}
+
+// sym doctor -- audit the whole install. Exit code 1 if anything is wrong
+// (warnings alone don't fail it).
+fn cmdDoctor(home: Text): Unit [io] = {
+    println("sym doctor -- " ++ winPath(home))
+    let layout = checkLayout(home)
+    printFindings("layout", layout)
+    var all = layout
+    if isDirectory(home) then {
+        let shims = checkShims(home)
+        printFindings("shims", shims)
+        let aliases = checkAliases(home)
+        printFindings("aliases", aliases)
+        let strays = checkStrays(home)
+        printFindings("orphans and leftovers", strays)
+        let pins = checkPins(home)
+        printFindings("project pins (nearest sym.toml from here)", pins)
+        all = List.concat(List.concat(List.concat(List.concat(all, shims), aliases), strays), pins)
+    } else {}
+
+    let problems = countLevel(all, "FAIL")
+    let warnings = countLevel(all, "warn")
+    println("")
+    if problems == 0 and warnings == 0 then println("no problems found")
+    else println(intToText(problems) ++ " problem(s), " ++ intToText(warnings) ++ " warning(s)")
+    if problems > 0 then Process.quit(1) else {}
+}
+
 fn main(): Unit [io] = {
     if argCount() < 2 then usageAndExit() else {}
     let cmd = unwrapOrFatal(arg(1), "internal error: missing command")
@@ -551,12 +993,25 @@ fn main(): Unit [io] = {
             let home = symHome()
             cmdAlias(home)
         }
+        "list" => {
+            let home = symHome()
+            cmdList(home)
+        }
+        "which" => {
+            let home = symHome()
+            cmdWhich(home)
+        }
+        "doctor" => {
+            let home = symHome()
+            cmdDoctor(home)
+        }
         "shim" => {
             if argCount() < 3 then usageAndExit() else {}
             let home = symHome()
             let sub = unwrapOrFatal(arg(2), "internal error: missing shim subcommand")
             match sub {
                 "add" => cmdShimAdd(home)
+                "add-all" => cmdShimAddAll(home)
                 "remove" => cmdShimRemove(home)
                 "list" => cmdShimList(home)
                 _ => usageAndExit()

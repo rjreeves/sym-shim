@@ -18,6 +18,30 @@ pub fn isReparsePoint(path: Text): Bool [io] = {
     ProcessResult.exitCode(result) == 0
 }
 
+// Where a junction points, or None if `path` isn't a junction (or its
+// target can't be read). Read from the same `fsutil reparsepoint query`
+// output isReparsePoint uses -- the line "Substitute Name:  \??\C:\real\dir"
+// -- with the NT-namespace prefix `\??\` stripped. fsutil's labels are
+// localized on non-English Windows, in which case this returns None and
+// callers fall back to showing the path as "an alias" without its target.
+pub fn junctionTarget(path: Text): Text? = {
+    let result = Process.exec("fsutil", ["reparsepoint", "query", path])
+    if ProcessResult.exitCode(result) != 0 then None
+    else {
+        var found: Text? = None
+        let label = "Substitute Name:"
+        for line in Text.split(ProcessResult.stdout(result), "\n") {
+            let t = Text.trim(line)
+            if Text.startsWith(t, label) then {
+                var value = Text.trim(Text.slice(t, Text.len(label), Text.len(t)))
+                if Text.startsWith(value, "\\??\\") then { value = Text.slice(value, 4, Text.len(value)) } else {}
+                found = Some(value)
+            } else {}
+        }
+        found
+    }
+}
+
 // Deletes exactly one reparse point without touching whatever it
 // targets. Returns true if nothing was there to begin with (nothing to
 // remove). Only ever call this on a path already confirmed to be a
@@ -158,6 +182,31 @@ test "setJunction refuses to replace a real directory" {
             None => assert(false, "the real directory's contents were deleted despite the refusal")
         }
 
+        let _ = removeDir(dir)
+    }
+}
+
+test "junctionTarget reads where an alias points, and is None for anything else" {
+    {
+        let dir = Path.join(junctionTestTempDir(), "sym-junctionTarget-test")
+        let _ = removeReparsePointOnly(Path.join(dir, "link"))
+        let _ = removeDir(dir)
+        let _ = makeDir(Path.join(dir, "real"))
+
+        let linked = setJunction(Path.join(dir, "link"), Path.join(dir, "real"))
+        assert(linked, "could not create the junction")
+
+        // Path.join uses forward slashes and fsutil reports backslashes, so
+        // compare the same path spelled one way, ignoring case.
+        let wanted = Text.toLower(Text.replace(Path.join(dir, "real"), "/", "\\"))
+        match junctionTarget(Path.join(dir, "link")) {
+            Some(t) => assert(Text.toLower(Text.replace(t, "/", "\\")) == wanted, "target should be " ++ wanted ++ " but was " ++ t)
+            None => assert(false, "a junction should report its target")
+        }
+        assert(junctionTarget(Path.join(dir, "real")) == None, "a real directory has no junction target")
+        assert(junctionTarget(Path.join(dir, "missing")) == None, "a missing path has no junction target")
+
+        let _ = removeReparsePointOnly(Path.join(dir, "link"))
         let _ = removeDir(dir)
     }
 }

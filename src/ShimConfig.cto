@@ -1,0 +1,360 @@
+module ShimConfig
+
+import Stdlib.Core
+import Stdlib.Text
+import Stdlib.File
+import Stdlib.Collections
+import Stdlib.Path
+import Stdlib.Env
+import Stdlib.Process
+
+// Everything sym needs to READ about shims, in one module so it can be
+// unit-tested: a module with a `main` can't be loaded by `certo test`, and
+// `certo test` doesn't link code from other user modules, so parsing and
+// resolution live together rather than in two files that import each other.
+//
+// Part 1 -- the flat `key = "value"` subset of TOML that shim descriptors
+// (shims\<name>.toml), project pins (sym.toml) and source configs all use:
+// `#` starts a full-line comment, blank lines are ignored, quotes around the
+// value are optional, no nesting.
+//
+// Part 2 (below) -- working out what a shimmed name will actually run.
+//
+// sym_shim.cto deliberately keeps its own copy of both: the shim stays one
+// self-contained file. tests/commands/run.ps1 runs the real shim next to
+// `sym which` so the two can't drift apart unnoticed.
+
+pub fn stripQuotes(s: Text): Text =
+    if Text.startsWith(s, "\"") and Text.endsWith(s, "\"") and Text.len(s) >= 2
+    then Text.slice(s, 1, Text.len(s) - 1)
+    else s
+
+pub type KeyValue = { key: Text, value: Text }
+
+pub fn parseKVLine(line: Text): KeyValue? = {
+    let trimmed = Text.trim(line)
+    if Text.len(trimmed) == 0 or Text.startsWith(trimmed, "#") then None
+    else match Text.indexOf(trimmed, "=") {
+        Some(eq) => Some(KeyValue {
+            key: Text.trim(Text.slice(trimmed, 0, eq)),
+            value: stripQuotes(Text.trim(Text.slice(trimmed, eq + 1, Text.len(trimmed))))
+        })
+        None => None
+    }
+}
+
+pub fn findKeyIn(content: Text, wantedKey: Text): Text? = {
+    var result: Text? = None
+    for line in Text.split(content, "\n") {
+        match parseKVLine(line) {
+            Some(kv) => {
+                if kv.key == wantedKey then { result = Some(kv.value) } else {}
+            }
+            None => {}
+        }
+    }
+    result
+}
+
+pub type Descriptor = { package: Text, command: Text, version: Text }
+
+pub fn parseDescriptor(content: Text): Descriptor = {
+    var package = ""
+    var command = ""
+    var version = ""
+    for line in Text.split(content, "\n") {
+        match parseKVLine(line) {
+            Some(kv) => {
+                match kv.key {
+                    "package" => { package = kv.value }
+                    "command" => { command = kv.value }
+                    "version" => { version = kv.value }
+                    _ => {}
+                }
+            }
+            None => {}
+        }
+    }
+    Descriptor { package: package, command: command, version: version }
+}
+
+// Rewrites `key`'s value if present (preserving every other line, including
+// comments), or appends a new "key = value" line if absent.
+pub fn upsertLine(content: Text, key: Text, value: Text): Text = {
+    if Text.len(Text.trim(content)) == 0 then key ++ " = \"" ++ value ++ "\"\n"
+    else {
+        var found = false
+        var result = ""
+        for line in Text.split(content, "\n") {
+            match parseKVLine(line) {
+                Some(kv) => {
+                    if kv.key == key then {
+                        result = result ++ key ++ " = \"" ++ value ++ "\"\n"
+                        found = true
+                    } else {
+                        result = result ++ line ++ "\n"
+                    }
+                }
+                None => {
+                    if Text.len(Text.trim(line)) == 0 then {}
+                    else { result = result ++ line ++ "\n" }
+                }
+            }
+        }
+        if found then result else result ++ key ++ " = \"" ++ value ++ "\"\n"
+    }
+}
+
+pub fn listTomlFiles(dir: Text): List<Text> = {
+    var result: List<Text> = List.empty()
+    match listDir(dir) {
+        Some(entries) => {
+            for e in entries {
+                if Text.endsWith(e, ".toml") then { result = List.push(result, e) } else {}
+            }
+        }
+        None => {}
+    }
+    result
+}
+
+test "parseKVLine handles quotes, spacing, comments and blanks" {
+    {
+        match parseKVLine("package = \"certo\"") {
+            Some(kv) => assert(kv.key == "package" and kv.value == "certo", "quoted value")
+            None => assert(false, "quoted line should parse")
+        }
+        match parseKVLine("  version=1.8.0  ") {
+            Some(kv) => assert(kv.key == "version" and kv.value == "1.8.0", "unquoted, unspaced, padded")
+            None => assert(false, "unquoted line should parse")
+        }
+        assert(parseKVLine("# a comment") == None, "comment is skipped")
+        assert(parseKVLine("   ") == None, "blank is skipped")
+        assert(parseKVLine("no equals sign") == None, "a line with no = is skipped")
+    }
+}
+
+test "parseDescriptor reads the three fields and ignores the rest" {
+    {
+        let d = parseDescriptor("# written by sym\npackage = \"certo\"\ncommand = \"certo.exe\"\nversion = \"latest\"\nextra = \"x\"\n")
+        assert(d.package == "certo" and d.command == "certo.exe" and d.version == "latest", "all three fields")
+        let partial = parseDescriptor("package = \"only\"\n")
+        assert(partial.package == "only" and partial.command == "" and partial.version == "", "missing fields come back empty")
+    }
+}
+
+test "upsertLine rewrites in place, appends when absent, keeps comments" {
+    {
+        let before = "# keep me\ncerto = \"1.7.0\"\nflux = \"1.2.0\"\n"
+        let rewritten = upsertLine(before, "certo", "1.9.0")
+        assert(rewritten == "# keep me\ncerto = \"1.9.0\"\nflux = \"1.2.0\"\n", "existing key changed, rest preserved")
+        let appended = upsertLine(before, "lume", "0.1.0")
+        assert(appended == before ++ "lume = \"0.1.0\"\n", "absent key appended")
+        assert(upsertLine("", "a", "b") == "a = \"b\"\n", "empty file gets a single line")
+    }
+}
+
+test "findKeyIn returns the last matching value or None" {
+    {
+        let c = "a = \"1\"\nb = \"2\"\na = \"3\"\n"
+        // Option<Text> can't be compared with == against a Some(...), so
+        // unwrap it: that is also how every caller consumes it.
+        match findKeyIn(c, "a") {
+            Some(v) => assert(v == "3", "later duplicate wins")
+            None => assert(false, "a should be found")
+        }
+        match findKeyIn(c, "b") {
+            Some(v) => assert(v == "2", "single key")
+            None => assert(false, "b should be found")
+        }
+        assert(findKeyIn(c, "zzz") == None, "absent key")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resolution: what running a shimmed name will actually do.
+// ---------------------------------------------------------------------------
+// What running a shimmed name will actually do, worked out the same way
+// sym_shim.cto does it at launch, so `sym which` and `sym doctor` report
+// what the shim WILL do rather than what someone assumes it does. The shim
+// itself stays one self-contained file and keeps its own copy of this
+// logic; tests/commands/run.ps1 runs the real shim and `sym which` side by
+// side and fails if they ever disagree.
+
+// The nearest sym.toml at or above a directory, and what it says about one
+// tool. file is "" when no sym.toml exists anywhere up the tree.
+pub type PinLookup = { file: Text, hasPin: Bool, version: Text }
+
+// Same walk as sym_shim.cto's climbForPin: the FIRST sym.toml found is the
+// project boundary. If it pins the tool, that wins; if it exists but doesn't
+// mention the tool, the walk still stops there (it does not merge with, or
+// look past to, a parent's file) and the global version applies.
+pub fn findPin(dir: Text, tool: Text): PinLookup [io] = {
+    let candidate = Path.join(dir, "sym.toml")
+    match readFile(candidate) {
+        Some(content) => {
+            match findKeyIn(content, tool) {
+                Some(v) => PinLookup { file: candidate, hasPin: true, version: v }
+                None => PinLookup { file: candidate, hasPin: false, version: "" }
+            }
+        }
+        None => {
+            let parent = Path.dirname(dir)
+            if parent == dir then PinLookup { file: "", hasPin: false, version: "" }
+            else findPin(parent, tool)
+        }
+    }
+}
+
+pub type Resolution = {
+    name: Text,
+    descriptorPath: Text,
+    hasDescriptor: Bool,
+    package: Text,
+    command: Text,
+    descriptorVersion: Text,
+    pin: PinLookup,
+    version: Text,
+    versionDir: Text,
+    target: Text
+}
+
+// name is the shim's name (certo, not certo.exe); cwd is where it would be
+// run from, which decides which project pin applies.
+pub fn resolveShim(home: Text, name: Text, cwd: Text): Resolution [io] = {
+    let descriptorPath = Path.join(Path.join(home, "shims"), name ++ ".toml")
+    let pin = findPin(cwd, name)
+    match readFile(descriptorPath) {
+        Some(content) => resolveFrom(
+            home, name, descriptorPath, pin,
+            orEmpty(findKeyIn(content, "package")),
+            orEmpty(findKeyIn(content, "command")),
+            orEmpty(findKeyIn(content, "version"))
+        )
+        None => Resolution {
+            name: name, descriptorPath: descriptorPath, hasDescriptor: false,
+            package: "", command: "", descriptorVersion: "",
+            pin: pin, version: "", versionDir: "", target: ""
+        }
+    }
+}
+
+fn orEmpty(o: Text?): Text =
+    match o {
+        Some(v) => v
+        None => ""
+    }
+
+// Split out of resolveShim, taking the descriptor's fields as plain Text:
+// the compiler mistypes a record built from a `let` inside a match arm, and
+// (under `certo test`) can't see a record type defined in an imported module
+// at all, so this avoids both by using only text and this module's own types.
+fn resolveFrom(home: Text, name: Text, descriptorPath: Text, pin: PinLookup, package: Text, command: Text, descriptorVersion: Text): Resolution = {
+    let version = if pin.hasPin then pin.version else descriptorVersion
+    let versionDir = Path.join(Path.join(Path.join(home, "packages"), package), version)
+    Resolution {
+        name: name, descriptorPath: descriptorPath, hasDescriptor: true,
+        package: package, command: command, descriptorVersion: descriptorVersion,
+        pin: pin, version: version, versionDir: versionDir,
+        target: Path.join(versionDir, command)
+    }
+}
+
+fn resolveTestTempDir(): Text [io] =
+    match getEnv("TEMP") {
+        Some(v) => v
+        None => {
+            eprintln("Resolve: TEMP is not set")
+            flush()
+            Process.quit(127)
+            ""
+        }
+    }
+
+fn resolveTestWipe(dir: Text): Unit [io] = {
+    let _ = removeDir(dir)
+}
+
+fn resolveTestSetup(name: Text): Text [io] = {
+    let dir = Path.join(resolveTestTempDir(), name)
+    resolveTestWipe(dir)
+    let _ = makeDir(Path.join(dir, "home"))
+    let _ = makeDir(Path.join(Path.join(dir, "home"), "shims"))
+    dir
+}
+
+test "findPin: a pin in the nearest sym.toml wins" {
+    {
+        let dir = resolveTestSetup("sym-resolve-pin-test")
+        let _ = makeDir(Path.join(dir, "proj"))
+        let _ = writeFile(Path.join(Path.join(dir, "proj"), "sym.toml"), "foo = \"2.0\"\n")
+        let p = findPin(Path.join(dir, "proj"), "foo")
+        assert(p.hasPin, "foo should be pinned")
+        assert(p.version == "2.0", "pinned version")
+        assert(Text.replace(p.file, "/", "\\") == Text.replace(Path.join(Path.join(dir, "proj"), "sym.toml"), "/", "\\"), "reports which file it came from")
+        resolveTestWipe(dir)
+    }
+}
+
+test "findPin: climbs from a subdirectory to the project's sym.toml" {
+    {
+        let dir = resolveTestSetup("sym-resolve-climb-test")
+        let _ = makeDir(Path.join(Path.join(dir, "proj"), "a"))
+        let _ = makeDir(Path.join(Path.join(Path.join(dir, "proj"), "a"), "b"))
+        let _ = writeFile(Path.join(Path.join(dir, "proj"), "sym.toml"), "foo = \"3.1\"\n")
+        let p = findPin(Path.join(Path.join(Path.join(dir, "proj"), "a"), "b"), "foo")
+        assert(p.hasPin and p.version == "3.1", "found two levels up")
+        resolveTestWipe(dir)
+    }
+}
+
+test "findPin: the nearest sym.toml wins entirely, it does not merge with a parent's" {
+    {
+        let dir = resolveTestSetup("sym-resolve-nearest-test")
+        let inner = Path.join(Path.join(dir, "proj"), "inner")
+        let _ = makeDir(inner)
+        let _ = writeFile(Path.join(Path.join(dir, "proj"), "sym.toml"), "foo = \"1.0\"\n")
+        let _ = writeFile(Path.join(inner, "sym.toml"), "bar = \"9.9\"\n")
+        let p = findPin(inner, "foo")
+        assert(!p.hasPin, "inner sym.toml doesn't mention foo, and the walk stops there")
+        assert(Text.endsWith(Text.replace(p.file, "/", "\\"), "inner\\sym.toml"), "and says it stopped at the inner file")
+        resolveTestWipe(dir)
+    }
+}
+
+test "resolveShim: global descriptor, then a project pin overriding it" {
+    {
+        let dir = resolveTestSetup("sym-resolve-shim-test")
+        let home = Path.join(dir, "home")
+        let _ = writeFile(Path.join(Path.join(home, "shims"), "foo.toml"), "package = \"foopkg\"\ncommand = \"foo.exe\"\nversion = \"1.0\"\n")
+        // a boundary sym.toml that doesn't pin foo, so the lookup is hermetic
+        // however the machine's own folders above TEMP are laid out
+        let _ = writeFile(Path.join(dir, "sym.toml"), "# boundary\n")
+
+        let g = resolveShim(home, "foo", dir)
+        assert(g.hasDescriptor, "descriptor found")
+        assert(g.package == "foopkg" and g.command == "foo.exe", "fields read")
+        assert(!g.pin.hasPin, "no pin applies here")
+        assert(g.version == "1.0", "falls back to the descriptor's version")
+        assert(Text.replace(g.target, "/", "\\") == Text.replace(Path.join(Path.join(Path.join(Path.join(home, "packages"), "foopkg"), "1.0"), "foo.exe"), "/", "\\"), "target is packages\\<package>\\<version>\\<command>")
+
+        let _ = makeDir(Path.join(dir, "proj"))
+        let _ = writeFile(Path.join(Path.join(dir, "proj"), "sym.toml"), "foo = \"2.0\"\n")
+        let p = resolveShim(home, "foo", Path.join(dir, "proj"))
+        assert(p.pin.hasPin and p.version == "2.0", "the project pin overrides the descriptor")
+        assert(p.descriptorVersion == "1.0", "while the descriptor's own version is still reported")
+        assert(Text.endsWith(Text.replace(p.target, "/", "\\"), "foopkg\\2.0\\foo.exe"), "and the target follows the pin")
+        resolveTestWipe(dir)
+    }
+}
+
+test "resolveShim: no descriptor" {
+    {
+        let dir = resolveTestSetup("sym-resolve-nodesc-test")
+        let _ = writeFile(Path.join(dir, "sym.toml"), "ghost = \"1.0\"\n")
+        let r = resolveShim(Path.join(dir, "home"), "ghost", dir)
+        assert(!r.hasDescriptor, "reports that there is no descriptor")
+        assert(r.pin.hasPin and r.pin.version == "1.0", "but still reports the pin that points at it")
+        resolveTestWipe(dir)
+    }
+}

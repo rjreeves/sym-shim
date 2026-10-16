@@ -106,10 +106,14 @@ try {
         Write-Host "`nTesting the built binaries..."
         Invoke-Certo @("test", (Join-Path $repo "src\AtomicWrite.cto")) "AtomicWrite tests"
         Invoke-Certo @("test", (Join-Path $repo "src\Junction.cto")) "Junction tests"
+        Invoke-Certo @("test", (Join-Path $repo "src\ShimConfig.cto")) "ShimConfig tests"
+        Invoke-Certo @("test", (Join-Path $repo "src\Glob.cto")) "Glob tests"
         & (Join-Path $repo "tests\arg-forwarding\run.ps1") -Certo $Certo -ShimExe (Join-Path $work "sym_shim.exe") | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "argument-forwarding test failed against the built shim" }
         & (Join-Path $repo "tests\alias-guards\run.ps1") -SymExe (Join-Path $work "sym.exe") | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "alias-guard test failed against the built sym.exe" }
+        & (Join-Path $repo "tests\commands\run.ps1") -Certo $Certo -SymExe (Join-Path $work "sym.exe") -ShimExe (Join-Path $work "sym_shim.exe") | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "command tests (list, which, doctor, shim add-all) failed against the built binaries" }
     }
 
     $name = "sym-{0}-{1}{2}" -f (Get-Date -Format "yyyyMMdd"), $commit, $(if ($dirty) { "-dirty" } else { "" })
@@ -144,7 +148,7 @@ try {
         "built (UTC) : $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))",
         "commit      : $commit$(if ($dirty) { '  (UNCOMMITTED CHANGES -- not reproducible from this commit)' })",
         "certo       : $certoVersion",
-        "tests       : $(if ($SkipTests) { 'SKIPPED' } else { 'passed (AtomicWrite, Junction, arg-forwarding, alias-guards)' })",
+        "tests       : $(if ($SkipTests) { 'SKIPPED' } else { 'passed (AtomicWrite, Junction, ShimConfig, Glob, arg-forwarding, alias-guards, commands)' })",
         "",
         "sha256:"
     )

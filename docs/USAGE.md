@@ -39,8 +39,9 @@ of `--branch master` means a future, unrelated change to Certo's
 `execInherit` signature change above is exactly that kind of change).
 Re-pin to a newer commit only after checking it still builds
 `src/sym.cto` and `src/sym_shim.cto` and passes the tests in
-`src/AtomicWrite.cto`, `src/Junction.cto`, `tests/arg-forwarding` and
-`tests/alias-guards`.
+`src/AtomicWrite.cto`, `src/Junction.cto`, `src/ShimConfig.cto`,
+`src/Glob.cto` (run each with `certo test`), and `tests/arg-forwarding`,
+`tests/alias-guards` and `tests/commands`.
 
 (Note: `certo` is a Cargo workspace with several binary-producing
 crates, so the package name `certo` must be passed explicitly — `--bin
@@ -360,34 +361,98 @@ old one first, risks the same corruption described above.
 ## 10. Shim a multi-binary release (a "toolchain")
 
 If a release exposes several binaries — Certo's ships `certo`,
-`certo-fmt`, `certo-lsp`, and more — place them all in the same version
-folder and write one descriptor per name, sharing `package`/`version`:
+`certo-fmt`, `certo-lsp`, and more — install them all into the same
+version folder, then shim them in one go:
+
+```bash
+sym shim add-all certo 1.8.0 "certo*"
+```
 
 ```
 packages\certo\1.8.0\
-    certo.exe
-    certo-fmt.exe
+    certo.exe        -> shim `certo`
+    certo-fmt.exe    -> shim `certo-fmt`
+    certo-lsp.exe    -> shim `certo-lsp`
+    db_users.exe     (doesn't match "certo*": left alone)
 ```
 
-```toml
-# shims\certo.toml
-package = "certo"
-command = "certo.exe"
-version = "1.8.0"
+Each matching `.exe` becomes a shim named after its file, with `package`
+and `version` shared across all of them. The pattern uses `*` and `?`,
+ignores case, and matches the file name with or without `.exe`; leave it
+out to shim every executable in the folder. Releases often contain
+executables you don't want on PATH (sample programs, helpers), so a
+pattern is usually what you want — and `--dry-run` shows what would happen
+without changing anything:
+
+```bash
+sym shim add-all certo 1.8.0 "certo*" --dry-run
 ```
 
-```toml
-# shims\certo-fmt.toml
-package = "certo"
-command = "certo-fmt.exe"
-version = "1.8.0"
+A name that's already shimmed to a *different* package is skipped with a
+message rather than overwritten (`sym shim remove <name>` first if you
+really want to replace it); re-running for the same package just
+re-stamps, so it's safe to repeat after rebuilding the shim. Equivalent by
+hand, per binary: `sym shim add certo-fmt certo 1.8.0 certo-fmt.exe`.
+
+`sym use certo 1.9.0` already switches every descriptor sharing that
+package together, so `certo` and `certo-fmt` can't end up on different
+versions.
+
+## 11. See what's installed and what will run
+
+```bash
+sym list                  # every package, its versions and aliases
+sym list certo            # just one package
+sym which certo           # exactly what typing `certo` here would run
 ```
 
-Copy the shim binary under both names in `bin\` as usual. When you
-switch versions, update **every** descriptor sharing that `package`
-value together (a real `sym use` would automate this by scanning
-`shims\*.toml` for matches) — don't leave `certo` on one version and
-`certo-fmt` on another.
+`sym list` shows each version folder, each alias with the version it
+points at, and which shims currently run each one:
+
+```
+certo
+  1.8.0
+  1.9.0
+  latest  -> 1.9.0   (alias)   used by: certo, certo-fmt
+```
+
+`sym which <name>` answers "what happens if I type this *here*": the shim
+file, its descriptor, whether a project `sym.toml` applies (and which
+one), the version that results, the alias it goes through, and the file it
+will launch, with a status of `ok`, `NOT INSTALLED` or `MISSING`. It exits
+`1` when the shim wouldn't work, so scripts can test it. It works the same
+way the shim does — the nearest `sym.toml` wins entirely, a parent's pin is
+not consulted — and `tests/commands` runs the real shim next to it to make
+sure the two agree.
+
+## 12. Check the install
+
+```bash
+sym doctor
+```
+
+Audits the whole install and prints `ok`, `warn` or `FAIL` for each check,
+then a summary. It exits `1` if anything is wrong (warnings alone don't
+fail it). It checks:
+
+- **layout** — the `shim\`, `bin\`, `shims\` and `packages\` folders, the
+  master `sym_shim.exe`, and whether `Sym\` and `Sym\bin` are on PATH.
+- **shims** — for every descriptor: it's complete, `bin\<name>.exe` exists,
+  that file is a copy of the *current* master shim (a different build is a
+  warning, with the exact `sym shim add` command to refresh it), and it is
+  **not hardlinked** to anything else — the drift that once let a write
+  through a shim destroy the real binary — and the version it points at
+  is actually installed.
+- **aliases** — every alias points at a folder that still exists, and not
+  at another alias.
+- **orphans and leftovers** — executables in `bin\` with no descriptor, and
+  `.tmp`/`.new` files left by an interrupted write.
+- **project pins** — the nearest `sym.toml` from where you run it: every
+  pinned tool is shimmed and its pinned version installed.
+
+The PATH checks look at the PATH of the shell you ran it from, so a
+terminal opened before the installer ran may report a warning that a new
+one wouldn't.
 
 ## Error reference
 
