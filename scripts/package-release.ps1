@@ -35,8 +35,12 @@
     install.cmd, install.ps1, README.txt, BUILD-INFO.txt) into this folder,
     creating it if needed. Only those six files are written -- anything
     else in the folder is left alone -- and each copy is verified against
-    the package by SHA-256. The previous copies are overwritten, not kept:
-    the bundle is reproducible from the commit BUILD-INFO.txt records.
+    the package by SHA-256. The previous copies are overwritten, not kept.
+    BUILD-INFO.txt records the commit they were built from, so an
+    equivalent bundle can be rebuilt from it -- equivalent, not identical:
+    builds are not bit-for-bit reproducible (the same compiler on the same
+    source gives different bytes each time), so the SHA-256 hashes in
+    BUILD-INFO.txt are what identify the exact files that shipped.
     Because a shipped bundle should be traceable and tested, this refuses
     to run from a working tree with uncommitted changes (see -AllowDirty)
     and cannot be combined with -SkipTests. Both checks happen before the
@@ -79,7 +83,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     }
 }
 if ($dirty) {
-    Write-Warning "Working tree has uncommitted changes -- this package can't be reproduced from commit $commit alone. BUILD-INFO.txt will say so."
+    Write-Warning "Working tree has uncommitted changes -- the source this package is built from isn't fully recorded in commit $commit, so it can't be rebuilt from that commit. BUILD-INFO.txt will say so."
 }
 
 # Fail before the slow part, not after it.
@@ -89,7 +93,7 @@ if ($CopyTo) {
     }
     if (($dirty -or $commit -eq "unknown") -and -not $AllowDirty) {
         $why = if ($commit -eq "unknown") { "can't tell which commit this is (no git)" } else { "the working tree has uncommitted changes" }
-        throw "Refusing -CopyTo: $why, so the bundle couldn't be reproduced from a commit. Commit first, or pass -AllowDirty to copy anyway."
+        throw "Refusing -CopyTo: $why, so the source the bundle is built from isn't recorded in a commit. Commit first, or pass -AllowDirty to copy anyway."
     }
 }
 
@@ -148,7 +152,7 @@ try {
     $files = Get-ChildItem -LiteralPath $pkg -File | Where-Object { $_.Name -ne "BUILD-INFO.txt" } | Sort-Object Name
     $info = @(
         "built (UTC) : $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))",
-        "commit      : $commit$(if ($dirty) { '  (UNCOMMITTED CHANGES -- not reproducible from this commit)' })",
+        "commit      : $commit$(if ($dirty) { '  (UNCOMMITTED CHANGES -- the source built is not fully in this commit)' })",
         "certo       : $certoVersion",
         "tests       : $(if ($SkipTests) { 'SKIPPED' } else { 'passed (AtomicWrite, Junction, ShimConfig, Glob, arg-forwarding, alias-guards, commands, ctrl-c)' })",
         "",
