@@ -439,6 +439,21 @@ to whatever invoked the shim, or to a script checking `$?`/`%ERRORLEVEL%`
 — the shim is indistinguishable from having run the real binary
 directly.
 
+That "indistinguishable" has to hold for Ctrl+C too, and it did not at
+first. Windows delivers Ctrl+C to every process attached to the console,
+so the shim and the real program both receive it. The shim is an ordinary
+program with the default handler, so it died on the spot — while a program
+that handles Ctrl+C itself (a shell cancelling its running command) carried
+on behind it, orphaned, still reading the terminal, its exit status lost.
+Measured with a test program in a hidden console: Ctrl+C at 1.8s, shim
+gone at 1.8s, real program running until 6.2s. `Process.execInherit` now
+ignores Ctrl+C in the waiting parent and restores it afterwards (see
+"Stdlib additions" below for why that must happen *after* the child is
+started), so the program decides and the shim returns its real exit code.
+`tests/ctrl-c` runs the scenarios — baseline without the shim, then through
+it with a program that handles Ctrl+C and one that doesn't — and fails
+against a shim built without the fix.
+
 ## Stdlib additions this project required
 
 Two primitives didn't exist in Certo's standard library before this
@@ -473,6 +488,15 @@ project, which only targets Windows.
 The third parameter, `workingDir`, was added upstream later; this
 project always passes `""` (inherit the shim's own directory), since a
 shimmed tool must run exactly where it was invoked.
+
+**Ctrl+C is ignored while waiting, but only after the child exists.**
+`execInherit` calls `SetConsoleCtrlHandler(NULL, TRUE)` between
+`CreateProcess` and the wait, and `(NULL, FALSE)` after it (on POSIX,
+`SIGINT` and `SIGQUIT` are ignored the same way, as `system(3)` does). The
+order matters: the "ignore Ctrl+C" flag is inherited by processes created
+while it is set, so setting it first would stop a child that relies on the
+default handler from dying on Ctrl+C. Certo's own test pins that ordering.
+Ctrl+Break is left alone as the way to force-stop a launcher.
 
 **Argument quoting matters here and used to be wrong.** On Windows the
 args list has to be flattened into the single command-line string

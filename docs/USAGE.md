@@ -21,17 +21,27 @@ from source, pinned to the exact commit `sym`/`sym_shim` are verified
 against:
 
 ```bash
-cargo install --git https://github.com/rjreeves/Certo --rev ac73d01826ead625384f64bc18d825ba785be4b6 certo
+cargo install --git https://github.com/rjreeves/Certo --rev 6d16532478f39117041cec792c41778905624ba6 certo
 ```
 
 That commit is the one with everything this project needs
-(`Process.execInherit` with its `workingDir` argument and correct
-Windows argument quoting, `getCurrentDir`, `HttpResponse.bodyBytes`,
-`renameFile`, `removeDir`) — verified by building all four `.cto`
-files and running both module test suites and `tests/arg-forwarding`
-against it directly. Don't pin earlier than `749dc02`: before it,
-`execInherit` takes two arguments (this project's code passes three)
-and mangles any argument ending in a backslash. Certo has
+(`Process.execInherit` with its `workingDir` argument, correct Windows
+argument quoting and Ctrl+C handling, `getCurrentDir`,
+`HttpResponse.bodyBytes`, `renameFile`, `removeDir`) — verified by
+building `src/sym.cto` and `src/sym_shim.cto` and running every test
+suite listed below against it directly. Don't pin earlier than the
+commit that introduced each of these, both inside `execInherit`:
+
+- `749dc02` — before it, `execInherit` takes two arguments (this
+  project's code passes three) and mangles any argument ending in a
+  backslash.
+- `6d16532` — before it, the shim dies the instant you press Ctrl+C even
+  when the tool behind it handles Ctrl+C itself, leaving that tool running
+  with nothing waiting on it and its real exit status lost. A shim built
+  by an older compiler fails `tests/ctrl-c`, and `scripts/package-release.ps1`
+  refuses to package it.
+
+Certo has
 exactly one tagged release (`v0.1.0`, June 2026), which predates all of
 these, so a release build won't work here; pinning to a commit instead
 of `--branch master` means a future, unrelated change to Certo's
@@ -41,7 +51,7 @@ Re-pin to a newer commit only after checking it still builds
 `src/sym.cto` and `src/sym_shim.cto` and passes the tests in
 `src/AtomicWrite.cto`, `src/Junction.cto`, `src/ShimConfig.cto`,
 `src/Glob.cto` (run each with `certo test`), and `tests/arg-forwarding`,
-`tests/alias-guards` and `tests/commands`.
+`tests/alias-guards`, `tests/commands` and `tests/ctrl-c`.
 
 (Note: `certo` is a Cargo workspace with several binary-producing
 crates, so the package name `certo` must be passed explicitly — `--bin
@@ -254,6 +264,19 @@ to the real `1.8.0` binary. `sym shim list` prints every currently
 shimmed name; `sym shim remove certo` deletes both `bin\certo.exe` and
 `shims\certo.toml` (leaving installed packages alone, since another
 name might still reference the same package/version).
+
+**Ctrl+C.** Pressing it in a terminal signals every program attached to
+that console — the shim *and* the tool it started. The shim ignores it
+while it waits and leaves the decision to the tool, then returns whatever
+the tool exits with. So a tool that handles Ctrl+C itself (a shell cancelling
+the running command, a REPL, an editor) carries on exactly as it would
+without the shim, and one that doesn't handle it dies as usual — with the
+same exit code as running it directly (`0xC000013A`). Without this the
+shim would die first, your terminal would show its prompt again while the
+tool was still running behind it, and the tool's real exit status would be
+lost. Ctrl+Break is not ignored: it still stops the shim. This lives in
+Certo's `Process.execInherit`, so a shim must be built with a compiler
+that includes it; `tests/ctrl-c` checks the result.
 
 ## 7. Switch versions
 
