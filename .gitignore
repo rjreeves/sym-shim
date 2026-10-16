@@ -6,5 +6,7 @@
 *.dll
 *.so
 *.c
+# ...except the hand-written C helpers for tests/ctrl-c: those are source, not generated output
+!tests/ctrl-c/*.c
 dist/
 out/
