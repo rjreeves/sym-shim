@@ -1,0 +1,9 @@
+module echoargs
+
+// Prints each argument it receives, bracketed and one per line, so a test
+// can see exactly what survived the trip through sym_shim.
+fn main(): Unit [io] = {
+    for i in range(1, argCount()) {
+        println("[" ++ (arg(i) ?? "<none>") ++ "]")
+    }
+}

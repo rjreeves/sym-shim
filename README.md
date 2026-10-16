@@ -443,7 +443,8 @@ compiler, fixed or worked around here:
    to temp files and returning them after the child exits — no live
    streaming, no real stdin. That's fatal for a shim (no progress bars,
    no interactive prompts, wrong stdout/stderr interleaving). Added
-   `Process.execInherit(cmd, args): Int` to the compiler
+   `Process.execInherit(cmd, args): Int` to the compiler (it has since
+   gained a required third `workingDir` argument — pass `""` to inherit)
    (`crates/stdlib/src/process.rs`, plus `seed.rs`/`effects_seed.rs`
    registration) — `CreateProcess` with inherited stdio handles on
    Windows, `fork`/`execvp` on POSIX — so the child is truly attached to

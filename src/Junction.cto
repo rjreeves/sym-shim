@@ -28,7 +28,7 @@ pub fn isReparsePoint(path: Text): Bool [io] = {
 // this whole module exists because of that finding).
 fn removeReparsePointOnly(path: Text): Bool [io] =
     if !isReparsePoint(path) then true
-    else Process.execInherit("cmd", ["/c rmdir " ++ Text.replace(path, "/", "\\")]) == 0
+    else Process.execInherit("cmd", ["/c rmdir " ++ Text.replace(path, "/", "\\")], "") == 0
 
 // Creates a directory junction at linkPath -> targetPath, or repoints it
 // if a junction already exists there. Refuses (returns false, touches
@@ -55,7 +55,7 @@ pub fn setJunction(linkPath: Text, targetPath: Text): Bool [io] =
         let _ = removeReparsePointOnly(tempPath)
         let winTarget = Text.replace(targetPath, "/", "\\")
         let winTemp = Text.replace(tempPath, "/", "\\")
-        let createCode = Process.execInherit("cmd", ["/c mklink /J " ++ winTemp ++ " " ++ winTarget])
+        let createCode = Process.execInherit("cmd", ["/c mklink /J " ++ winTemp ++ " " ++ winTarget], "")
         if createCode != 0 then false
         else if !removeReparsePointOnly(linkPath) then false
         else renameFile(tempPath, linkPath)

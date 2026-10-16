@@ -73,7 +73,7 @@ test "writeBytesAtomic does not corrupt a path hardlinked to its target" {
         // command it runs must be a single merged argument.
         let winLinked = Text.replace(linkedPath, "/", "\\")
         let winReal = Text.replace(realPath, "/", "\\")
-        let linkCode = Process.execInherit("cmd", ["/c mklink /H " ++ winLinked ++ " " ++ winReal])
+        let linkCode = Process.execInherit("cmd", ["/c mklink /H " ++ winLinked ++ " " ++ winReal], "")
         assert(linkCode == 0, "mklink /H failed with exit code " ++ intToText(linkCode))
 
         let wrote = writeBytesAtomic(linkedPath, Bytes.fromText("SHIM CONTENT"))

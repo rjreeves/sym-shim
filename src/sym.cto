@@ -321,7 +321,7 @@ fn fetchInstall(home: Text, pv: PkgVer): Unit [io] = {
             if !madeExtractDir then fatal("could not create " ++ extractDir) else {}
 
             flush()
-            let code = Process.execInherit("tar", ["-xf", tempArchive, "-C", extractDir])
+            let code = Process.execInherit("tar", ["-xf", tempArchive, "-C", extractDir], "")
             if code != 0 then fatal("tar extraction failed with exit code " ++ intToText(code)) else {}
 
             let extractedFile = Path.join(extractDir, binaryPath)

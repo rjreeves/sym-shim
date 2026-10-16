@@ -160,6 +160,6 @@ fn main(): Unit [io] = {
     let forwardedArgs = collectArgs(1, argCount(), List.empty())
 
     flush()
-    let code = Process.execInherit(target, forwardedArgs)
+    let code = Process.execInherit(target, forwardedArgs, "")
     Process.quit(code)
 }

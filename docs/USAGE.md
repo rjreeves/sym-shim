@@ -21,19 +21,25 @@ from source, pinned to the exact commit `sym`/`sym_shim` are verified
 against:
 
 ```bash
-cargo install --git https://github.com/rjreeves/Certo --rev 9cf8298ffb91fb01203bd292a110607134de9d2e certo
+cargo install --git https://github.com/rjreeves/Certo --rev ac73d01826ead625384f64bc18d825ba785be4b6 certo
 ```
 
 That commit is the one with everything this project needs
-(`Process.execInherit`, `getCurrentDir`, `HttpResponse.bodyBytes`,
-`renameFile`, `removeDir`) — verified by building both `.cto` files
-against it directly. Certo has
-exactly one tagged release (`v0.1.0`, June 2026), predating all five,
-so a release build won't work here; pinning to a commit instead of
-`--branch master` means a future, unrelated change to Certo's `master`
-can't silently break this project's build. Re-pin to a newer commit
-only after checking it still builds both `src/sym.cto` and
-`src/sym_shim.cto` cleanly.
+(`Process.execInherit` with its `workingDir` argument and correct
+Windows argument quoting, `getCurrentDir`, `HttpResponse.bodyBytes`,
+`renameFile`, `removeDir`) — verified by building all four `.cto`
+files and running both module test suites and `tests/arg-forwarding`
+against it directly. Don't pin earlier than `749dc02`: before it,
+`execInherit` takes two arguments (this project's code passes three)
+and mangles any argument ending in a backslash. Certo has
+exactly one tagged release (`v0.1.0`, June 2026), which predates all of
+these, so a release build won't work here; pinning to a commit instead
+of `--branch master` means a future, unrelated change to Certo's
+`master` can't silently break this project's build (the
+`execInherit` signature change above is exactly that kind of change).
+Re-pin to a newer commit only after checking it still builds
+`src/sym.cto` and `src/sym_shim.cto` and passes the tests in
+`src/AtomicWrite.cto`, `src/Junction.cto` and `tests/arg-forwarding`.
 
 (Note: `certo` is a Cargo workspace with several binary-producing
 crates, so the package name `certo` must be passed explicitly — `--bin

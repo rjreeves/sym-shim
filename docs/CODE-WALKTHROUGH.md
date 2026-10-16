@@ -416,7 +416,7 @@ need to know or care.
 let forwardedArgs = collectArgs(1, argCount(), List.empty())
 
 flush()
-let code = Process.execInherit(target, forwardedArgs)
+let code = Process.execInherit(target, forwardedArgs, "")
 Process.quit(code)
 ```
 
@@ -428,7 +428,9 @@ writing to the same shared console — otherwise buffered shim output
 can appear interleaved incorrectly relative to the child's own output.
 
 `Process.execInherit` is the other stdlib addition this project
-required (below) — it launches `target` with `forwardedArgs`, with the
+required (below) — it launches `target` with `forwardedArgs` (the
+trailing `""` is its working-directory argument; empty means "inherit
+the shim's own"), with the
 child's stdin/stdout/stderr connected directly to the shim's own (not
 captured, not buffered, not replayed afterward), and blocks until the
 child exits, returning its real exit code as an `Int`. `Process.quit`
@@ -443,7 +445,7 @@ Two primitives didn't exist in Certo's standard library before this
 project needed them. Both live in the Certo compiler checkout
 (`C:\Users\robert\Desktop\Certo`), not in this repository.
 
-### `Process.execInherit(cmd: Text, args: List<Text>): Int`
+### `Process.execInherit(cmd: Text, args: List<Text>, workingDir: Text): Int`
 
 Added in `crates/stdlib/src/process.rs`. Before this, `Stdlib.Process`
 only offered `Process.exec`, which runs the child via `system()`/
@@ -467,6 +469,27 @@ descriptors by default, no extra wiring needed) + `waitpid` +
 consistency with the rest of the stdlib file (which already has
 `#ifdef _WIN32`/`#else` pairs throughout) — it's untested by this
 project, which only targets Windows.
+
+The third parameter, `workingDir`, was added upstream later; this
+project always passes `""` (inherit the shim's own directory), since a
+shimmed tool must run exactly where it was invoked.
+
+**Argument quoting matters here and used to be wrong.** On Windows the
+args list has to be flattened into the single command-line string
+`CreateProcess` takes, and the child re-splits it with
+`CommandLineToArgvW`'s rules: backslashes are literal *unless* they
+precede a double quote, in which case they must be doubled (and the
+same for backslashes right before the closing quote). The original
+`append_arg` only escaped `"`, so an argument ending in a backslash —
+`lume run "C:\my dir\"` — had its closing quote swallowed, merging
+that argument with the next ones into one garbled string. Fixed
+upstream in Certo commit `749dc02`; `tests/arg-forwarding/` pushes eight
+tricky arguments (trailing backslash, embedded quote, backslash before
+a quote, empty, UNC-style path) through a real shim into an echo
+program and diffs what arrives, so a compiler regression can't quietly
+reintroduce it. Shims stamped from a `sym_shim.exe` built by an older
+compiler carry the old runtime — re-run `sym shim add` for each after
+rebuilding.
 
 ### `getCurrentDir(): Text`
 
