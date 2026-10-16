@@ -54,11 +54,41 @@ certo src/sym.cto -o sym.exe
 
 `sym_shim.exe` is generic — it doesn't know which tool it's fronting
 until you copy it under a specific name (step 6). `sym.exe` is the CLI
-that does that copying and the rest of the bookkeeping for you; keep it
-wherever's convenient on your own `PATH` (it isn't part of the `Sym\`
-layout itself, unlike the shim).
+that does that copying and the rest of the bookkeeping for you. By hand
+you can keep it wherever's convenient on your own `PATH`; the installer
+below puts it in the `Sym\` folder itself, next to `shim\` and `bin\`.
 
 ## 3. Set up the directory layout
+
+**On a machine that only needs to *run* sym** — no Certo, no build —
+skip steps 1–2 and this one. Build once, on a machine that has Certo:
+
+```powershell
+.\scripts\package-release.ps1
+```
+
+That builds both binaries, runs the tests against exactly those builds
+(and refuses to package if one fails), and writes
+`dist\sym-<date>-<commit>\` plus a `.zip` containing `sym.exe`,
+`sym_shim.exe`, `install.cmd`, `install.ps1`, a `README.txt`, and a
+`BUILD-INFO.txt` recording the commit, the Certo version and a SHA-256 of
+every file. Copy that folder or zip to the target PC and run
+`install.cmd` there (double-click works; it clears the "downloaded from
+the internet" mark on the extracted files first, so a `RemoteSigned`
+policy doesn't refuse `install.ps1`, though an `AllSigned` policy still
+would). It
+creates the layout below, copies both binaries into place, runs
+`sym shim list` against the result to confirm the install works, and
+adds `Sym\` and `Sym\bin` to your user PATH. Open a new terminal
+afterwards. It needs no admin rights and is safe to re-run (it also
+works as a way to update the binaries). To install without touching
+PATH, run `install.ps1` directly instead — PATH is only changed when
+you pass `-AddToPath`, which `install.cmd` does for you. Running it
+straight from a checkout also works: it finds the binaries in the repo
+root. The PATH edit works on the raw registry value, so existing
+`%USERPROFILE%`-style entries are left exactly as they were.
+
+The rest of this step is what the installer does, for doing it by hand.
 
 The shim expects this structure under `%LOCALAPPDATA%\Sym` (or wherever
 `SYM_HOME` points, if you set that environment variable):
