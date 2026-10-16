@@ -12,6 +12,8 @@
          install.cmd, install.ps1, README.txt and BUILD-INFO.txt (commit,
          certo version, SHA-256 of every file)
       4. zips that folder
+      5. with -CopyTo, also copies the package's files into a folder you
+         already ship (e.g. a bundle's bin\), so that bundle can't go stale
 
     Copy the folder or zip to the target PC and run install.cmd there.
     The target needs only Windows; see install.ps1.
@@ -27,13 +29,31 @@
 
 .PARAMETER NoZip
     Leave just the folder.
+
+.PARAMETER CopyTo
+    After packaging, copy the package's files (sym.exe, sym_shim.exe,
+    install.cmd, install.ps1, README.txt, BUILD-INFO.txt) into this folder,
+    creating it if needed. Only those six files are written -- anything
+    else in the folder is left alone -- and each copy is verified against
+    the package by SHA-256. The previous copies are overwritten, not kept:
+    the bundle is reproducible from the commit BUILD-INFO.txt records.
+    Because a shipped bundle should be traceable and tested, this refuses
+    to run from a working tree with uncommitted changes (see -AllowDirty)
+    and cannot be combined with -SkipTests. Both checks happen before the
+    build starts.
+
+.PARAMETER AllowDirty
+    Let -CopyTo proceed from a tree with uncommitted changes. BUILD-INFO.txt
+    will still say so.
 #>
 [CmdletBinding()]
 param(
     [string]$Certo = "certo",
     [string]$OutDir,
     [switch]$SkipTests,
-    [switch]$NoZip
+    [switch]$NoZip,
+    [string]$CopyTo,
+    [switch]$AllowDirty
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +80,17 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 }
 if ($dirty) {
     Write-Warning "Working tree has uncommitted changes -- this package can't be reproduced from commit $commit alone. BUILD-INFO.txt will say so."
+}
+
+# Fail before the slow part, not after it.
+if ($CopyTo) {
+    if ($SkipTests) {
+        throw "-CopyTo can't be combined with -SkipTests: a bundle you ship should have passed the tests."
+    }
+    if (($dirty -or $commit -eq "unknown") -and -not $AllowDirty) {
+        $why = if ($commit -eq "unknown") { "can't tell which commit this is (no git)" } else { "the working tree has uncommitted changes" }
+        throw "Refusing -CopyTo: $why, so the bundle couldn't be reproduced from a commit. Commit first, or pass -AllowDirty to copy anyway."
+    }
 }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ("sym-package-" + [Guid]::NewGuid().ToString("N"))
@@ -128,7 +159,44 @@ try {
 
     Write-Host "`nPackaged: $pkg"
     if (-not $NoZip) { Write-Host "Zip:      $zip" }
-    Write-Host "Copy it to the target PC and run install.cmd there."
+
+    if ($CopyTo) {
+        if (-not (Test-Path -LiteralPath $CopyTo)) {
+            New-Item -ItemType Directory -Force $CopyTo | Out-Null
+            Write-Host "`nCreated $CopyTo"
+        }
+        Write-Host "`nCopying the package into $CopyTo..."
+        foreach ($f in Get-ChildItem -LiteralPath $pkg -File | Sort-Object Name) {
+            $dest = Join-Path $CopyTo $f.Name
+            $srcHash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+            $existed = Test-Path -LiteralPath $dest
+            # An existing file we can't even read (locked by a running program)
+            # just counts as "different": the copy below then fails with the
+            # clear "Could not write" message instead of a raw hashing error.
+            $destHash = $null
+            if ($existed) { try { $destHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash } catch { } }
+            if ($existed -and $destHash -eq $srcHash) {
+                Write-Host ("  unchanged  {0}" -f $f.Name)
+                continue
+            }
+            # copy beside the destination, then rename over it, so a failure
+            # (e.g. sym.exe in use) never leaves a truncated file in the bundle
+            $temp = "$dest.new"
+            try {
+                Copy-Item -LiteralPath $f.FullName -Destination $temp -Force
+                Move-Item -LiteralPath $temp -Destination $dest -Force
+            } catch {
+                if (Test-Path -LiteralPath $temp) { [IO.File]::Delete($temp) }
+                throw "Could not write $dest ($($_.Exception.Message))."
+            }
+            if ((Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash -ne $srcHash) {
+                throw "$dest does not match the package after copying."
+            }
+            Write-Host ("  {0,-10} {1}" -f $(if ($existed) { "updated" } else { "added" }), $f.Name)
+        }
+    } else {
+        Write-Host "Copy it to the target PC and run install.cmd there."
+    }
 }
 finally {
     [IO.Directory]::Delete($work, $true)

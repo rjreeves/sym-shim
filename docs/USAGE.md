@@ -73,7 +73,14 @@ That builds both binaries, runs the tests against exactly those builds
 `dist\sym-<date>-<commit>\` plus a `.zip` containing `sym.exe`,
 `sym_shim.exe`, `install.cmd`, `install.ps1`, a `README.txt`, and a
 `BUILD-INFO.txt` recording the commit, the Certo version and a SHA-256 of
-every file. Copy that folder or zip to the target PC and run
+every file. If you ship the binaries inside a larger bundle, add
+`-CopyTo <folder>` and the same six files are also copied into that
+folder (nothing else in it is touched, each copy is verified by hash, and
+the output says which files were updated, added or already current) so
+the bundle can't quietly go stale. It refuses to run from a tree with
+uncommitted changes (`-AllowDirty` overrides) or with `-SkipTests`, since
+a shipped bundle should be tested and traceable to a commit; both checks
+happen before the build starts. Copy that folder or zip to the target PC and run
 `install.cmd` there (double-click works; it clears the "downloaded from
 the internet" mark on the extracted files first, so a `RemoteSigned`
 policy doesn't refuse `install.ps1`, though an `AllSigned` policy still

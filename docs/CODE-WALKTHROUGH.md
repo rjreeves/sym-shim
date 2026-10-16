@@ -442,8 +442,8 @@ directly.
 ## Stdlib additions this project required
 
 Two primitives didn't exist in Certo's standard library before this
-project needed them. Both live in the Certo compiler checkout
-(`C:\Users\robert\Desktop\Certo`), not in this repository.
+project needed them. Both live in the Certo compiler repository
+([rjreeves/Certo](https://github.com/rjreeves/Certo)), not in this one.
 
 ### `Process.execInherit(cmd: Text, args: List<Text>, workingDir: Text): Int`
 
