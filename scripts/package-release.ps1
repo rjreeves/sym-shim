@@ -77,6 +77,8 @@ try {
         Invoke-Certo @("test", (Join-Path $repo "src\Junction.cto")) "Junction tests"
         & (Join-Path $repo "tests\arg-forwarding\run.ps1") -Certo $Certo -ShimExe (Join-Path $work "sym_shim.exe") | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "argument-forwarding test failed against the built shim" }
+        & (Join-Path $repo "tests\alias-guards\run.ps1") -SymExe (Join-Path $work "sym.exe") | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "alias-guard test failed against the built sym.exe" }
     }
 
     $name = "sym-{0}-{1}{2}" -f (Get-Date -Format "yyyyMMdd"), $commit, $(if ($dirty) { "-dirty" } else { "" })
@@ -111,7 +113,7 @@ try {
         "built (UTC) : $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))",
         "commit      : $commit$(if ($dirty) { '  (UNCOMMITTED CHANGES -- not reproducible from this commit)' })",
         "certo       : $certoVersion",
-        "tests       : $(if ($SkipTests) { 'SKIPPED' } else { 'passed (AtomicWrite, Junction, arg-forwarding)' })",
+        "tests       : $(if ($SkipTests) { 'SKIPPED' } else { 'passed (AtomicWrite, Junction, arg-forwarding, alias-guards)' })",
         "",
         "sha256:"
     )

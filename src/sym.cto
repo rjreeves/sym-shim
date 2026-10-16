@@ -343,6 +343,26 @@ fn fetchInstall(home: Text, pv: PkgVer): Unit [io] = {
 
 fn cmdInstall(home: Text): Unit [io] = {
     let pv = requirePkgVer(arg(2), arg(3), "install")
+
+    // The write-side twin of the guard in cmdUninstall. If <version> is an
+    // alias (a directory junction made by `sym alias`), installing "into"
+    // it writes straight through the junction and overwrites a file inside
+    // whatever real version it points at -- a folder named for one version
+    // now holding another's build. A plain folder that merely happens to be
+    // called "latest" is not an alias and installs normally (re-running
+    // overwrites it in place, which is what a dev build wants). Checked here,
+    // before the local-file and fetch paths split, so a fetch is refused
+    // before anything is downloaded.
+    let versionDir = Path.join(Path.join(Path.join(home, "packages"), pv.package), pv.version)
+    if isReparsePoint(versionDir) then
+        fatal(
+            "'" ++ pv.version ++ "' is an alias (a directory junction) for " ++ pv.package ++
+            ", not a real version -- installing into it would overwrite a file inside whatever " ++
+            "real version it points at. Install under a real version number, then repoint the " ++
+            "alias: sym alias " ++ pv.package ++ " " ++ pv.version ++ " <real-version>"
+        )
+    else {}
+
     match arg(4) {
         Some(source) => {
             let commandName = arg(5) ?? Path.basename(source)

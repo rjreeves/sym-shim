@@ -39,7 +39,8 @@ of `--branch master` means a future, unrelated change to Certo's
 `execInherit` signature change above is exactly that kind of change).
 Re-pin to a newer commit only after checking it still builds
 `src/sym.cto` and `src/sym_shim.cto` and passes the tests in
-`src/AtomicWrite.cto`, `src/Junction.cto` and `tests/arg-forwarding`.
+`src/AtomicWrite.cto`, `src/Junction.cto`, `tests/arg-forwarding` and
+`tests/alias-guards`.
 
 (Note: `certo` is a Cargo workspace with several binary-producing
 crates, so the package name `certo` must be passed explicitly — `--bin
@@ -177,6 +178,19 @@ before it's installed — without one, `sym install` still works, just
 prints an "unverified" warning. See the README's "Fetching a package"
 section for the full format and the reasoning behind pinning checksums
 separately rather than trusting whatever the release itself publishes.
+
+**Installing as `latest`.** `<version>` is just a folder name, so
+`sym install mytool latest mytool.exe` works and is a perfectly good fit
+for a tool you rebuild constantly and only ever want the newest copy of:
+`latest` is an ordinary folder, and re-running the install overwrites it
+in place (it can't replace a copy that's currently running — close it
+first). The one thing it can't be is *both* that and an alias. If
+`latest` is a directory junction made by `sym alias` (step 9), `sym
+install` refuses rather than writing through it into whatever real
+version it points at; install under a real version number and repoint
+the alias instead. Pick one model per package: a literal `latest` folder
+for a single always-newest dev build, or real versions plus
+`sym alias` when you want to keep old versions and roll back.
 
 ## 5. Remove an installed version
 

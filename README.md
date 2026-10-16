@@ -154,8 +154,11 @@ packages\certo\
 ```
 
 `sym alias certo latest 1.9.0` creates or repoints it; `sym uninstall`
-refuses to run on an alias name rather than deleting through it (see
-"Repointing an alias safely" below for why that distinction matters).
+and `sym install` both refuse to run on an alias name rather than
+deleting or writing through it (see "Repointing an alias safely" below
+for why that distinction matters). A plain folder that merely happens to
+be called `latest` is not an alias and is unaffected — installing into it
+just overwrites it in place, which suits a single always-newest dev build.
 
 Once that junction exists, `version = "latest"` in `shims\certo.toml`
 and `certo = "latest"` in `sym.toml` both resolve correctly — verified
