@@ -50,8 +50,9 @@ of `--branch master` means a future, unrelated change to Certo's
 Re-pin to a newer commit only after checking it still builds
 `src/sym.cto` and `src/sym_shim.cto` and passes the tests in
 `src/AtomicWrite.cto`, `src/Junction.cto`, `src/ShimConfig.cto`,
-`src/Glob.cto` (run each with `certo test`), and `tests/arg-forwarding`,
-`tests/alias-guards`, `tests/commands` and `tests/ctrl-c`.
+`src/Glob.cto`, `src/Names.cto` (run each with `certo test`), and
+`tests/arg-forwarding`, `tests/alias-guards`, `tests/name-validation`,
+`tests/commands`, `tests/install-package` and `tests/ctrl-c`.
 
 (Note: `certo` is a Cargo workspace with several binary-producing
 crates, so the package name `certo` must be passed explicitly — `--bin
@@ -145,8 +146,21 @@ change ever required, no matter how many tools you shim later.
 
 ## 4. Install a real version of a tool
 
-Two ways: give `sym install` a file you already have, or let it fetch
-one.
+**What names are allowed.** A package, version, alias or shim name
+becomes a folder or file name under the Sym home, so `sym` accepts only
+letters, digits and `. _ + -`, starting with a letter or digit and not
+ending in `.`. That covers real names such as `certo`, `ion-win`,
+`pg_sentinel`, `1.0.72.261016.86`, `0.9.0+598c4bb…` and `latest`. Anything
+else — an empty string, `.`, `..`, a path (`..\x`, `a/b`, `C:\x`), spaces,
+`=` — is refused with `sym: invalid <kind> '<value>': <why>` before
+anything on disk is touched. (Without this, `sym uninstall tool ..`
+deleted the whole `packages\` folder.) The `<command-filename>` is
+looser — spaces and parentheses are fine in `My Tool.exe` — but it must
+still be one plain file name, never a path. `sym shim add-all` skips,
+and says it skipped, any executable whose name can't be a shim name.
+
+Two ways to install: give `sym install` a file you already have, or let
+it fetch one.
 
 **With a local file:**
 
@@ -420,6 +434,43 @@ hand, per binary: `sym shim add certo-fmt certo 1.8.0 certo-fmt.exe`.
 `sym use certo 1.9.0` already switches every descriptor sharing that
 package together, so `certo` and `certo-fmt` can't end up on different
 versions.
+
+### From a zip, in one command
+
+If the release comes as a zip (Certo's `dist\certo-<version>-windows-x64.zip`
+holds eight executables plus `docs\`, `examples\`, `README.md` and a
+`VERSION` file), `scripts\install-package.ps1` does the whole sequence —
+install every executable, alias `latest`, shim them all:
+
+```powershell
+.\scripts\install-package.ps1 -Package certo -Source C:\path\to\certo-1.0.73-windows-x64.zip
+```
+
+It unpacks to a temporary folder, finds the `.exe` files at the top, works
+out the version (`-Version`, else the package's `VERSION` file, else the
+archive name `certo-1.0.73-…`), and starts `certo.exe --version` to prove the
+package runs *before* installing anything — only that one executable, since
+the others needn't accept `--version` and an editor server like `certo-lsp`
+would sit waiting for input. Then it runs `sym install` for each file
+(verifying each copy), `sym alias certo latest 1.0.73`, and
+`sym shim add-all certo latest "*"`, and finishes with `certo --version` through
+the shim and a `sym doctor` summary. Only executables are installed; docs
+and examples stay in the zip.
+
+Re-running the same version overwrites in place; a newer version is installed
+alongside the old, so rolling back is `sym alias certo latest <old-version>`.
+Useful options: `-DryRun` (unpack, validate and print the plan, change nothing),
+`-ShimPattern certo` (shim only `certo.exe`), `-NoShim`, `-NoAlias` (shims then
+point straight at the version), `-Alias <name>`, and `-Sym <path>`. It installs
+into `SYM_HOME` if set, else `%LOCALAPPDATA%\Sym`. A source can also be an
+already-unpacked folder.
+
+It stops with an explanation rather than guessing when something is off: no
+way to tell the version, a version that isn't a single plain folder name
+(`..\x`, `a\b`), no executables, or `packages\<pkg>\latest` being an ordinary
+folder from an older install (sym won't replace that with an alias; the files
+are already installed under their version, so move the folder and re-run, or
+use `-Alias`/`-NoAlias`).
 
 ## 11. See what's installed and what will run
 

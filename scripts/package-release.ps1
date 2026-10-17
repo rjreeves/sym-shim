@@ -112,12 +112,17 @@ try {
         Invoke-Certo @("test", (Join-Path $repo "src\Junction.cto")) "Junction tests"
         Invoke-Certo @("test", (Join-Path $repo "src\ShimConfig.cto")) "ShimConfig tests"
         Invoke-Certo @("test", (Join-Path $repo "src\Glob.cto")) "Glob tests"
+        Invoke-Certo @("test", (Join-Path $repo "src\Names.cto")) "Names tests"
         & (Join-Path $repo "tests\arg-forwarding\run.ps1") -Certo $Certo -ShimExe (Join-Path $work "sym_shim.exe") | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "argument-forwarding test failed against the built shim" }
         & (Join-Path $repo "tests\alias-guards\run.ps1") -SymExe (Join-Path $work "sym.exe") | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "alias-guard test failed against the built sym.exe" }
+        & (Join-Path $repo "tests\name-validation\run.ps1") -Certo $Certo -SymExe (Join-Path $work "sym.exe") | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "name-validation test failed against the built sym.exe" }
         & (Join-Path $repo "tests\commands\run.ps1") -Certo $Certo -SymExe (Join-Path $work "sym.exe") -ShimExe (Join-Path $work "sym_shim.exe") | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "command tests (list, which, doctor, shim add-all) failed against the built binaries" }
+        & (Join-Path $repo "tests\install-package\run.ps1") -Certo $Certo -SymExe (Join-Path $work "sym.exe") -ShimExe (Join-Path $work "sym_shim.exe") | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "install-package tests failed against the built binaries" }
         & (Join-Path $repo "tests\ctrl-c\run.ps1") -Certo $Certo -ShimExe (Join-Path $work "sym_shim.exe") | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "Ctrl+C test failed against the built shim -- is the certo compiler you built with older than the Process.execInherit Ctrl+C fix?" }
     }
@@ -154,7 +159,7 @@ try {
         "built (UTC) : $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))",
         "commit      : $commit$(if ($dirty) { '  (UNCOMMITTED CHANGES -- the source built is not fully in this commit)' })",
         "certo       : $certoVersion",
-        "tests       : $(if ($SkipTests) { 'SKIPPED' } else { 'passed (AtomicWrite, Junction, ShimConfig, Glob, arg-forwarding, alias-guards, commands, ctrl-c)' })",
+        "tests       : $(if ($SkipTests) { 'SKIPPED' } else { 'passed (AtomicWrite, Junction, ShimConfig, Glob, Names, arg-forwarding, alias-guards, name-validation, commands, install-package, ctrl-c)' })",
         "",
         "sha256:"
     )

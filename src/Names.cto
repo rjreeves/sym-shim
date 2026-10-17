@@ -1,0 +1,127 @@
+module Names
+
+import Stdlib.Core
+import Stdlib.Text
+
+// Package names, versions, aliases and shim names all become folder or file
+// names under the Sym home: packages\<package>\<version>\, shims\<name>.toml,
+// bin\<name>.exe. Unchecked, an argument is a path fragment -- an empty
+// version made `sym uninstall tool ""` delete every version of tool, and
+// `..` made `sym uninstall tool ..` delete the whole packages\ folder, both
+// reporting success. These rules make every such argument ONE plain name.
+//
+// Each function returns "" when the value is fine, or a short reason it is
+// not, so the caller can build the message and the rules can be unit-tested
+// here (a module with a `main` can't be loaded by `certo test`).
+
+fn letters(): Text = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+fn digits(): Text = "0123456789"
+
+// A package, version, alias or shim name: letters, digits and . _ + - only,
+// starting with a letter or digit. That covers every name in use
+// (certo, ion-win, pg_sentinel, 1.0.72.261016.86, 0.9.0+598c4bb..., latest)
+// and excludes everything that can steer a path: empty, ".", "..", slashes,
+// colons, spaces, quotes, "=" and newlines (which would corrupt a descriptor
+// or sym.toml line).
+pub fn nameProblem(value: Text): Text =
+    if Text.len(value) == 0 then "is empty"
+    else if !Text.contains(letters() ++ digits(), Text.slice(value, 0, 1))
+        then "must start with a letter or digit"
+    else if Text.endsWith(value, ".")
+        then "must not end with '.' (Windows treats \"x.\" and \"x\" as the same name)"
+    else firstDisallowedChar(value, 0)
+
+fn firstDisallowedChar(value: Text, i: Int): Text =
+    if i >= Text.len(value) then ""
+    else if Text.contains(letters() ++ digits() ++ "._+-", Text.slice(value, i, i + 1))
+        then firstDisallowedChar(value, i + 1)
+    else "contains '" ++ Text.slice(value, i, i + 1) ++ "' -- only letters, digits and . _ + - are allowed"
+
+// The name of a file inside a version folder (the "command"): more
+// permissive than a name -- spaces and parentheses are fine in "My Tool.exe"
+// -- but it must still be ONE file name, never a path.
+pub fn fileNameProblem(value: Text): Text =
+    if Text.len(value) == 0 then "is empty"
+    else if value == "." or value == ".." then "is not a file name"
+    else if Text.endsWith(value, ".") or Text.endsWith(value, " ")
+        then "must not end with '.' or a space"
+    else firstBadFileNameChar(value, ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "\n", "\r", "\t"], 0)
+
+fn firstBadFileNameChar(value: Text, bad: List<Text>, i: Int): Text =
+    if i >= List.len(bad) then ""
+    else {
+        let c = List.get(bad, i) ?? ""
+        if Text.len(c) > 0 and Text.contains(value, c)
+            then "contains a character not allowed in a file name (" ++ describe(c) ++ ")"
+            else firstBadFileNameChar(value, bad, i + 1)
+    }
+
+fn describe(c: Text): Text =
+    if c == "\n" then "a newline"
+    else if c == "\r" then "a carriage return"
+    else if c == "\t" then "a tab"
+    else if c == "\\" or c == "/" then "a path separator '" ++ c ++ "'"
+    else "'" ++ c ++ "'"
+
+test "nameProblem accepts every name actually in use" {
+    {
+        for n in ["certo", "ion-win", "lume", "stash", "vicki", "win", "pg_sentinel", "db_users",
+                  "latest", "lts", "1.8.0", "1.0.73", "1.0.72.261016.86", "0.1.0-bootstrap",
+                  "0.9.0+598c4bbae470136da6fd3ca33966fc431e337c8a", "v2", "A", "7", "tool_2.1-rc+build5"] {
+            assert(nameProblem(n) == "", "should be valid: " ++ n)
+        }
+    }
+}
+
+test "nameProblem rejects empty, dots and anything that is a path" {
+    {
+        assert(nameProblem("") == "is empty", "empty")
+        assert(nameProblem(".") != "", "single dot")
+        assert(nameProblem("..") != "", "double dot")
+        assert(nameProblem("...") != "", "triple dot")
+        assert(nameProblem(".hidden") != "", "leading dot")
+        assert(nameProblem("-flag") != "", "leading dash (could be read as an option)")
+        assert(nameProblem("_x") != "", "leading underscore")
+        assert(nameProblem("+x") != "", "leading plus")
+        for n in ["..\\evil", "../evil", "a\\b", "a/b", "\\", "/", "C:\\x", "c:x", "a:b", "x\\..", "1.0\\..", "..\\..\\x"] {
+            assert(nameProblem(n) != "", "path-like value must be rejected: " ++ n)
+        }
+    }
+}
+
+test "nameProblem rejects characters that corrupt descriptors or invite trouble" {
+    {
+        for n in ["a b", " a", "a ", "a=b", "a\"b", "a'b", "a\nb", "a\rb", "a\tb", "a#b", "a*b", "a?b", "a<b", "a>b", "a|b", "a;b", "a,b", "a(b)", "a%b", "a&b", "a$b", "é"] {
+            assert(nameProblem(n) != "", "should be rejected: " ++ n)
+        }
+        assert(nameProblem("1.0.") != "", "trailing dot: Windows folds 1.0. into 1.0")
+        assert(nameProblem("x.") != "", "trailing dot")
+    }
+}
+
+test "nameProblem says why" {
+    {
+        assert(Text.contains(nameProblem("a b"), "' '"), "names the offending space")
+        assert(Text.contains(nameProblem(""), "empty"), "says empty")
+        assert(Text.contains(nameProblem(".."), "start with"), "says what a name must start with")
+    }
+}
+
+test "fileNameProblem accepts ordinary file names, including spaces" {
+    {
+        for n in ["certo.exe", "certo-fmt.exe", "ion-win.exe", "My Tool.exe", "tool (1).exe", "a.b.c", "x", "pg_sentinel.exe", "README"] {
+            assert(fileNameProblem(n) == "", "should be valid: " ++ n)
+        }
+    }
+}
+
+test "fileNameProblem rejects anything that is not one plain file name" {
+    {
+        assert(fileNameProblem("") == "is empty", "empty")
+        assert(fileNameProblem(".") != "", "dot")
+        assert(fileNameProblem("..") != "", "dotdot")
+        for n in ["..\\x.exe", "../x.exe", "a\\b.exe", "a/b.exe", "C:\\x.exe", "a:b.exe", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b", "a\nb", "a\rb", "a\tb", "x.exe.", "x.exe "] {
+            assert(fileNameProblem(n) != "", "should be rejected: " ++ n)
+        }
+    }
+}

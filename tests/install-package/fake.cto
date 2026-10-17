@@ -1,0 +1,8 @@
+module fake
+
+// Stand-in for a package's executables. tests/install-package/run.ps1 replaces
+// @VERSION@ and compiles one copy per version, so `<exe> --version` reports a
+// version the install script can check against.
+fn main(): Unit [io] = {
+    println("fakepkg @VERSION@")
+}
