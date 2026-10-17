@@ -9,8 +9,8 @@
       2. runs the tests against exactly those builds, and refuses to package
          if any fails (use -SkipTests to override)
       3. assembles dist\sym-<date>-<commit>\ holding sym.exe, sym_shim.exe,
-         install.cmd, install.ps1, README.txt and BUILD-INFO.txt (commit,
-         certo version, SHA-256 of every file)
+         install.cmd, install.ps1, install-package.ps1, README.txt and
+         BUILD-INFO.txt (commit, certo version, SHA-256 of every file)
       4. zips that folder
       5. with -CopyTo, also copies the package's files into a folder you
          already ship (e.g. a bundle's bin\), so that bundle can't go stale
@@ -32,8 +32,9 @@
 
 .PARAMETER CopyTo
     After packaging, copy the package's files (sym.exe, sym_shim.exe,
-    install.cmd, install.ps1, README.txt, BUILD-INFO.txt) into this folder,
-    creating it if needed. Only those six files are written -- anything
+    install.cmd, install.ps1, install-package.ps1, README.txt,
+    BUILD-INFO.txt) into this folder, creating it if needed. Only those
+    seven files are written -- anything
     else in the folder is left alone -- and each copy is verified against
     the package by SHA-256. The previous copies are overwritten, not kept.
     BUILD-INFO.txt records the commit they were built from, so an
@@ -133,7 +134,7 @@ try {
     New-Item -ItemType Directory -Force $pkg | Out-Null
 
     Copy-Item (Join-Path $work "sym.exe"), (Join-Path $work "sym_shim.exe") $pkg
-    Copy-Item (Join-Path $repo "scripts\install.cmd"), (Join-Path $repo "scripts\install.ps1") $pkg
+    Copy-Item (Join-Path $repo "scripts\install.cmd"), (Join-Path $repo "scripts\install.ps1"), (Join-Path $repo "scripts\install-package.ps1") $pkg
 
     Set-Content -LiteralPath (Join-Path $pkg "README.txt") -Encoding ASCII -Value @(
         "sym - install on a machine with nothing else on it",
@@ -151,6 +152,14 @@ try {
         "   powershell -ExecutionPolicy Bypass -File install.ps1",
         "",
         "Re-running install.cmd is safe, and is how you update.",
+        "",
+        "To install a tool from a zip or folder (e.g. one with several .exe files),",
+        "after sym itself is installed:",
+        "   powershell -ExecutionPolicy Bypass -File install-package.ps1 -Package certo -Source C:\path\to\certo-1.0.73-windows-x64.zip",
+        "It installs every .exe as one version, points 'latest' at it and shims",
+        "them all. Add -DryRun first to see the plan; Get-Help .\install-package.ps1",
+        "-Full lists the options.",
+        "",
         "BUILD-INFO.txt records exactly what this package was built from."
     )
 

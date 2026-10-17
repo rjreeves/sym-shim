@@ -83,10 +83,11 @@ skip steps 1–2 and this one. Build once, on a machine that has Certo:
 That builds both binaries, runs the tests against exactly those builds
 (and refuses to package if one fails), and writes
 `dist\sym-<date>-<commit>\` plus a `.zip` containing `sym.exe`,
-`sym_shim.exe`, `install.cmd`, `install.ps1`, a `README.txt`, and a
+`sym_shim.exe`, `install.cmd`, `install.ps1`, `install-package.ps1` (step 10),
+a `README.txt`, and a
 `BUILD-INFO.txt` recording the commit, the Certo version and a SHA-256 of
 every file. If you ship the binaries inside a larger bundle, add
-`-CopyTo <folder>` and the same six files are also copied into that
+`-CopyTo <folder>` and the same seven files are also copied into that
 folder (nothing else in it is touched, each copy is verified by hash, and
 the output says which files were updated, added or already current) so
 the bundle can't quietly go stale. It refuses to run from a tree with
